@@ -1,4 +1,5 @@
 ﻿using PrometheusTools.Shared.Enums;
+using System;
 
 namespace PrometheusTools.Shared.Abstract
 {
