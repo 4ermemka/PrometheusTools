@@ -3,7 +3,7 @@
     public enum LogType
     {
         Info,
-        Warn,
+        Warning,
         Error,
         Fatal
     }

@@ -98,5 +98,7 @@ namespace PrometheusTools.Shared.Networking
                 OnLog.Invoke(LogType.Info, $"Accepting new clients ended");
             }, _listenNewClientsCancellationToken);
         }
+    
+        
     }
 }
