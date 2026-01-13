@@ -5,46 +5,62 @@ using System.Reflection;
 namespace Assets.Shared.ChangeDetector
 {
     /// <summary>
-    /// Расширение TrackableNode, которое может не только отслеживать изменения,
-    /// но и применять входящий патч по пути (для клиента, получающего данные по сети).
+    /// Расширение TrackableNode, которое умеет применять входящие патчи по пути.
+    /// Используется на принимающей стороне (клиенты и хост, принимающий патчи от других).
     /// </summary>
     public abstract class SyncNode : TrackableNode
     {
-        /// <summary>
-        /// Применяет изменение к текущему узлу по заданному пути.
-        /// Используется на принимающей стороне для обновления состояния по патчу.
-        /// </summary>
-        /// <param name="path">Путь сегментов от этого узла вниз.</param>
-        /// <param name="newValue">Новое значение для конечного поля.</param>
-        public void ApplyPatch(IReadOnlyList<FieldPathSegment> path, object? newValue)
-        {
-            if (path == null || path.Count == 0)
-                throw new ArgumentException("Path must not be empty.", nameof(path));
+        private bool _suppressChanges;
 
-            ApplyPatchInternal(path, 0, newValue);
+        /// <summary>
+        /// Применяет патч так, чтобы НЕ генерировать собственные события Changed.
+        /// Используется для входящих сетевых патчей и снапшотов.
+        /// </summary>
+        public void ApplyPatchSilently(IReadOnlyList<FieldPathSegment> path, object? newValue)
+        {
+            _suppressChanges = true;
+            try
+            {
+                ApplyPatchInternal(path, 0, newValue);
+            }
+            finally
+            {
+                _suppressChanges = false;
+            }
         }
 
         /// <summary>
-        /// Рекурсивное применение патча, начиная с указанного индекса сегмента.
+        /// Применяет патч с генерацией событий (если нужно).
+        /// Реже используется, обычно достаточно Silently.
         /// </summary>
+        public void ApplyPatch(IReadOnlyList<FieldPathSegment> path, object? newValue)
+        {
+            ApplyPatchInternal(path, 0, newValue);
+        }
+
+        protected override void RaiseChange(FieldChange change)
+        {
+            if (_suppressChanges)
+                return;
+            base.RaiseChange(change);
+        }
+
         private void ApplyPatchInternal(IReadOnlyList<FieldPathSegment> path, int index, object? newValue)
         {
-            var segment = path[index].Name;
+            var segmentName = path[index].Name;
             var type = GetType();
             var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
-            // Ищем свойство или поле с таким именем
-            var member = (MemberInfo)type.GetProperty(segment, flags)
-                         ?? type.GetField(segment, flags);
+            var member = (MemberInfo)type.GetProperty(segmentName, flags)
+                         ?? type.GetField(segmentName, flags);
 
             if (member == null)
-                throw new InvalidOperationException($"Member '{segment}' not found on type '{type.Name}'.");
+                throw new InvalidOperationException($"Member '{segmentName}' not found on '{type.Name}'.");
 
             bool isLast = index == path.Count - 1;
 
             if (isLast)
             {
-                // Базовый случай: присваиваем значение полю/свойству
                 SetMemberValue(member, newValue);
             }
             else
@@ -55,15 +71,10 @@ namespace Assets.Shared.ChangeDetector
                 {
                     childSync.ApplyPatchInternal(path, index + 1, newValue);
                 }
-                else if (childValue is TrackableNode childTrackable)
-                {
-                    throw new InvalidOperationException(
-                        $"Member '{segment}' on '{type.Name}' is TrackableNode but not SyncNode; cannot apply patch.");
-                }
                 else
                 {
                     throw new InvalidOperationException(
-                        $"Member '{segment}' on '{type.Name}' is not a TrackableNode; cannot continue path.");
+                        $"Member '{segmentName}' on '{type.Name}' is not SyncNode; cannot continue path.");
                 }
             }
         }
@@ -96,28 +107,13 @@ namespace Assets.Shared.ChangeDetector
             }
         }
 
-        /// <summary>
-        /// Простейшая конвертация входного значения к целевому типу.
-        /// На практике здесь может быть десериализация из строки/JSON и т.п.
-        /// </summary>
         private object? ConvertIfNeeded(object? value, Type targetType)
         {
             if (value == null)
                 return targetType.IsValueType ? Activator.CreateInstance(targetType) : null;
-
             if (targetType.IsInstanceOfType(value))
                 return value;
-
-            // Попытка через System.Convert (для примитивов)
-            try
-            {
-                return Convert.ChangeType(value, targetType);
-            }
-            catch
-            {
-                // В реальном коде: логировать и/или бросать специализированное исключение
-                throw;
-            }
+            return Convert.ChangeType(value, targetType);
         }
     }
 
