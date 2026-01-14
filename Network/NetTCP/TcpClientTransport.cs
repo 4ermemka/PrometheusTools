@@ -3,6 +3,7 @@ using System;
 using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
+using UnityEngine;
 
 namespace Assets.Scripts.Network.NetTCP
 {
@@ -93,15 +94,16 @@ namespace Assets.Scripts.Network.NetTCP
                         DataReceived(_serverId, segment);
                 }
             }
-            catch
+            catch(Exception ex)
             {
                 // лог при желании
+                Debug.LogException(ex);
             }
-            finally
-            {
-                if (Disconnected != null)
-                    Disconnected(_serverId);
-            }
+            //finally
+            //{
+            //    if (Disconnected != null)
+            //        Disconnected(_serverId);
+            //}
         }
 
         private static async Task<bool> ReadExactAsync(NetworkStream stream, byte[] buffer, int offset, int count, CancellationToken ct)

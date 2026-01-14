@@ -1,4 +1,5 @@
 ﻿using Assets.Shared.ChangeDetector;
+using Assets.Shared.ChangeDetector.Base.Mapping;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -56,11 +57,15 @@ namespace Assets.Scripts.Network.NetCore
 
         private async void OnLocalWorldChanged(FieldChange change)
         {
+            var path = new List<FieldPathSegment>(change.Path);
+            var newValue = SyncValueConverter.ToDtoIfNeeded(change.NewValue);
+
             var patch = new PatchMessage
             {
-                Path = new List<FieldPathSegment>(change.Path),
-                NewValue = change.NewValue
+                Path = path,
+                NewValue = newValue
             };
+
             var packet = MakePacket(MessageType.Patch, patch);
             await _transport.SendAsync(Guid.Empty, packet, CancellationToken.None);
         }
@@ -84,9 +89,11 @@ namespace Assets.Scripts.Network.NetCore
                 case MessageType.Patch:
                     {
                         var patch = _serializer.Deserialize<PatchMessage>(payload);
+                        var value = SyncValueConverter.FromDtoIfNeeded(patch.NewValue);
                         var pathStr = string.Join(".", patch.Path.Select(p => p.Name));
-                        Debug.Log($"[CLIENT] Apply patch {pathStr}: {patch.NewValue}");
-                        _worldState.ApplyPatchSilently(patch.Path, patch.NewValue);
+
+                        Debug.Log($"[CLIENT] Apply patch {pathStr}: {value}");
+                        _worldState.ApplyPatchSilently(patch.Path, value);
                         break;
                     }
             }
