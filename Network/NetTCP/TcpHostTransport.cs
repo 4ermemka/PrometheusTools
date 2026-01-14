@@ -1,6 +1,8 @@
 using Assets.Scripts.Network.NetCore;
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
@@ -29,6 +31,11 @@ namespace Assets.Scripts.Network.NetTCP
         private TcpListener _listener;
         private CancellationTokenSource _cts;
         private Task _acceptLoopTask;
+
+        /// <summary>
+        /// Текущий список подключенных клиентов.
+        /// </summary>
+        public IReadOnlyCollection<Guid> Clients => _clients.Keys.ToList();
 
         public Task StartAsync(string address, int port, CancellationToken token = default)
         {
@@ -89,8 +96,7 @@ namespace Assets.Scripts.Network.NetTCP
                 _clients[clientId] = client;
                 _streams[clientId] = client.GetStream();
 
-                if (Connected != null)
-                    Connected(clientId);
+                Connected?.Invoke(clientId);
 
                 _ = Task.Run(() => ClientReceiveLoopAsync(clientId, client, ct), ct);
             }
@@ -127,8 +133,7 @@ namespace Assets.Scripts.Network.NetTCP
                         break;
 
                     var segment = new ArraySegment<byte>(payloadBuffer, 0, payloadBuffer.Length);
-                    if (DataReceived != null)
-                        DataReceived(clientId, segment);
+                    DataReceived?.Invoke(clientId, segment);
                 }
             }
             catch
@@ -137,15 +142,12 @@ namespace Assets.Scripts.Network.NetTCP
             }
             finally
             {
-                TcpClient removedClient;
-                _clients.TryRemove(clientId, out removedClient);
-                NetworkStream removedStream;
-                _streams.TryRemove(clientId, out removedStream);
+                _clients.TryRemove(clientId, out var removedClient);
+                _streams.TryRemove(clientId, out var removedStream);
 
                 try { client.Close(); } catch { /* ignore */ }
 
-                if (Disconnected != null)
-                    Disconnected(clientId);
+                Disconnected?.Invoke(clientId);
             }
         }
 
@@ -164,8 +166,7 @@ namespace Assets.Scripts.Network.NetTCP
 
         public async Task SendAsync(Guid clientId, ArraySegment<byte> payload, CancellationToken token = default)
         {
-            NetworkStream stream;
-            if (!_streams.TryGetValue(clientId, out stream))
+            if (!_streams.TryGetValue(clientId, out var stream))
                 return;
 
             try
@@ -193,10 +194,30 @@ namespace Assets.Scripts.Network.NetTCP
             }
         }
 
+        /// <summary>
+        /// Широковещательная отправка всем клиентам, кроме указанного.
+        /// </summary>
+        public async Task BroadcastExceptAsync(Guid excludedClientId, ArraySegment<byte> payload, CancellationToken token = default)
+        {
+            foreach (var pair in _streams)
+            {
+                if (pair.Key == excludedClientId)
+                    continue;
+
+                try
+                {
+                    await pair.Value.WriteAsync(payload.Array, payload.Offset, payload.Count, token);
+                }
+                catch
+                {
+                    // при ошибке можно инициировать отключение конкретного клиента
+                }
+            }
+        }
+
         public void Dispose()
         {
             _ = StopAsync();
         }
     }
-
 }

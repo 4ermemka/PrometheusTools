@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -18,12 +19,12 @@ namespace Assets.Scripts.Network.NetCore
         Task StartAsync(string address, int port, CancellationToken token = default);
         Task StopAsync(CancellationToken token = default);
 
-        /// <summary>Отправка уже сформированного пакета [type][len][payload].</summary>
         Task SendAsync(Guid clientId, ArraySegment<byte> payload, CancellationToken token = default);
 
-        /// <summary>Широковещательная отправка пакета всем клиентам.</summary>
         Task BroadcastAsync(ArraySegment<byte> payload, CancellationToken token = default);
-    }
 
+        // Новое: список известных клиентов (для серверной реализации)
+        IReadOnlyCollection<Guid> Clients { get; }
+    }
 }
 

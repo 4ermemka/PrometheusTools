@@ -1,5 +1,6 @@
 using Assets.Scripts.Network.NetCore;
 using System;
+using System.Collections.Generic;
 using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
@@ -24,6 +25,8 @@ namespace Assets.Scripts.Network.NetTCP
 
         // Для клиента serverId всегда один (можно использовать Guid.Empty).
         private readonly Guid _serverId = Guid.Empty;
+
+        public IReadOnlyCollection<Guid> Clients { get; } = new[] { Guid.Empty };
 
         public async Task StartAsync(string address, int port, CancellationToken token = default)
         {
