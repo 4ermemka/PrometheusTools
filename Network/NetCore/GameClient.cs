@@ -1,22 +1,22 @@
 ﻿using Assets.Shared.ChangeDetector;
 using Assets.Shared.ChangeDetector.Base.Mapping;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
 
 namespace Assets.Scripts.Network.NetCore
 {
-    /// <summary>
-    /// Клиент, который держит локальный WorldState и обменивается патчами с хостом.
-    /// </summary>
     public sealed class GameClient : IDisposable
     {
         private readonly ITransport _transport;
         private readonly SyncNode _worldState;
         private readonly IGameSerializer _serializer;
+
+        private readonly ConcurrentQueue<PatchMessage> _incomingPatches = new();
+        private readonly ConcurrentQueue<Action> _mainThreadActions = new();
 
         public event Action ConnectedToHost;
         public event Action DisconnectedFromHost;
@@ -34,27 +34,137 @@ namespace Assets.Scripts.Network.NetCore
             _worldState.Changed += OnLocalWorldChanged;
         }
 
-        public Task ConnectAsync(string host, int port, CancellationToken ct = default)
-            => _transport.StartAsync(host, port, ct);
+        public async Task ConnectAsync(string address, int port, CancellationToken ct = default)
+        {
+            await _transport.StartAsync(address, port, ct);
+        }
 
-        public Task DisconnectAsync(CancellationToken ct = default)
-            => _transport.StopAsync(ct);
+        public async Task DisconnectAsync(CancellationToken ct = default)
+        {
+            await _transport.StopAsync(ct);
+        }
+
+        public void Dispose()
+        {
+            _worldState.Changed -= OnLocalWorldChanged;
+
+            _transport.Connected -= OnConnected;
+            _transport.Disconnected -= OnDisconnected;
+            _transport.DataReceived -= OnDataReceived;
+
+            _transport.Dispose();
+        }
 
         private void OnConnected(Guid _)
         {
             ConnectedToHost?.Invoke();
-
-            var empty = Array.Empty<byte>();
-            var packet = MakePacket(MessageType.SnapshotRequest, empty);
-            _transport.SendAsync(Guid.Empty, packet, CancellationToken.None);
         }
 
         private void OnDisconnected(Guid _)
         {
-            if (DisconnectedFromHost != null)
-                DisconnectedFromHost();
+            DisconnectedFromHost?.Invoke();
         }
 
+        /// <summary>
+        /// Входящие данные с транспорта. Этот колбэк вызывается НЕ на Unity main thread.
+        /// Здесь только раскладываем сообщения по очередям.
+        /// </summary>
+        private void OnDataReceived(Guid _, ArraySegment<byte> data)
+        {
+            var parsed = ParsePacket(data);
+            var type = parsed.Item1;
+            var payload = parsed.Item2;
+
+            Debug.Log($"[CLIENT] recv packet type={type}, len={payload.Length}");
+
+            switch (type)
+            {
+                case MessageType.Snapshot:
+                    {
+                        var snapshot = _serializer.Deserialize<SnapshotMessage>(payload);
+
+                        // Любые операции, которые могут привести к RaiseChange → MonoBehaviour,
+                        // выполняем на главном потоке через очередь действий.
+                        _mainThreadActions.Enqueue(() =>
+                        {
+                            ApplySnapshot(snapshot);
+                        });
+
+                        break;
+                    }
+
+                case MessageType.Patch:
+                    {
+                        var patch = _serializer.Deserialize<PatchMessage>(payload);
+                        _incomingPatches.Enqueue(patch);
+                        break;
+                    }
+            }
+        }
+
+        /// <summary>
+        /// Вызывается из MonoBehaviour.Update на главном потоке.
+        /// Здесь применяем патчи и снапшоты.
+        /// </summary>
+        public void Update()
+        {
+            // 1. Применяем все накопленные патчи
+            while (_incomingPatches.TryDequeue(out var patch))
+            {
+                var value = SyncValueConverter.FromDtoIfNeeded(patch.NewValue);
+                _worldState.ApplyPatchSilently(patch.Path, value);
+            }
+
+            // 2. Выполняем все отложенные действия (снапшоты и пр.)
+            while (_mainThreadActions.TryDequeue(out var action))
+            {
+                try
+                {
+                    action();
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogException(ex);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Применение снапшота к _worldState.
+        /// Здесь уже главный поток, можно безопасно вызывать методы,
+        /// которые в итоге приведут к RaiseChange → WorldStateMono → transform.
+        /// </summary>
+        private void ApplySnapshot(SnapshotMessage snapshot)
+        {
+            // самый простой вариант: полностью десериализовать состояние и
+            // применить его к существующему _worldState.
+            // Предположим, что WorldState – NetworkedSpriteState, обёрнутый SyncNode.
+
+            var newState = _serializer.Deserialize<NetworkedSpriteState>(snapshot.WorldStatePayload);
+
+            // Здесь два пути:
+            // 1) заменить объект целиком и переобернуть SyncNode (если твой дизайн это позволяет);
+            // 2) пройтись по полям и применить патчи к _worldState.
+            //
+            // Для текущего теста можно сделать прямое присваивание полей.
+            // Допустим, у тебя только Position (и Changed сам поднимется через TrackableNode).
+
+            if (_worldState is NetworkedSpriteState spriteState)
+            {
+                spriteState.Position = newState.Position;
+                // если есть ещё поля — присвоить их аналогично
+            }
+            else
+            {
+                // если SyncNode оборачивает другой тип, здесь можно
+                // сделать маппинг newState → _worldState через собственные методы
+                Debug.LogWarning("[CLIENT] ApplySnapshot: _worldState is not NetworkedSpriteState.");
+            }
+        }
+
+        /// <summary>
+        /// Локальное изменение мира → формируем Patch и отправляем хосту.
+        /// </summary>
         private async void OnLocalWorldChanged(FieldChange change)
         {
             var path = new List<FieldPathSegment>(change.Path);
@@ -70,58 +180,9 @@ namespace Assets.Scripts.Network.NetCore
             await _transport.SendAsync(Guid.Empty, packet, CancellationToken.None);
         }
 
-        private void OnDataReceived(Guid _, ArraySegment<byte> data)
+        private ArraySegment<byte> MakePacket<T>(MessageType type, T message)
         {
-            var parsed = ParsePacket(data);
-            var type = parsed.Item1;
-            var payload = parsed.Item2;
-
-            Debug.Log($"[CLIENT] Got packet type = {type}, len = {payload.Length}");
-
-            switch (type)
-            {
-                case MessageType.Snapshot:
-                    {
-                        var snapshot = _serializer.Deserialize<SnapshotMessage>(payload);
-                        ApplySnapshot(snapshot);
-                        break;
-                    }
-                case MessageType.Patch:
-                    {
-                        var patch = _serializer.Deserialize<PatchMessage>(payload);
-                        //Debug.Log($"[CLIENT] Patch raw NewValue type = {patch.NewValue?.GetType().FullName ?? "null"}");
-                        var value = SyncValueConverter.FromDtoIfNeeded(patch.NewValue);
-                        //Debug.Log($"[CLIENT] Patch converted NewValue type = {value?.GetType().FullName ?? "null"}");
-                        _worldState.ApplyPatchSilently(patch.Path, value);
-                        break;
-                    }
-            }
-        }
-
-        private void ApplySnapshot(SnapshotMessage snapshot)
-        {
-            // десериализуем ту же модель, с которой работаем (_worldState : SyncNode)
-            var fresh = _serializer.Deserialize<NetworkedSpriteState>(snapshot.WorldStatePayload);
-
-            // простой вариант для отладки — применить полные патчи к текущему _worldState:
-            // 1) Position
-            _worldState.ApplyPatchSilently(
-                new List<FieldPathSegment> { new FieldPathSegment(nameof(NetworkedSpriteState.Position)) },
-                fresh.Position
-            );
-
-            // при более сложном WorldState сюда добавишь остальные поля
-        }
-
-        private ArraySegment<byte> MakePacket<T>(MessageType type, T messageOrEmpty)
-        {
-            byte[] payload;
-
-            if (messageOrEmpty is byte[])
-                payload = (byte[])(object)messageOrEmpty;
-            else
-                payload = _serializer.Serialize(messageOrEmpty);
-
+            var payload = _serializer.Serialize(message);
             var result = new byte[1 + 4 + payload.Length];
             result[0] = (byte)type;
             var len = payload.Length;
@@ -149,15 +210,5 @@ namespace Assets.Scripts.Network.NetCore
 
             return Tuple.Create(type, payload);
         }
-
-        public void Dispose()
-        {
-            _worldState.Changed -= OnLocalWorldChanged;
-            _transport.Connected -= OnConnected;
-            _transport.Disconnected -= OnDisconnected;
-            _transport.DataReceived -= OnDataReceived;
-            _transport.Dispose();
-        }
     }
-
 }
