@@ -10,41 +10,33 @@ namespace Assets.Shared.ChangeDetector
     /// </summary>
     public abstract class SyncNode : TrackableNode
     {
-        private bool _suppressChanges;
-
         /// <summary>
-        /// Применяет патч так, чтобы НЕ генерировать собственные события Changed.
+        /// Применяет патч с генерацией событий Changed (если значение реально изменилось).
         /// Используется для входящих сетевых патчей и снапшотов.
         /// </summary>
         public void ApplyPatchSilently(IReadOnlyList<FieldPathSegment> path, object? newValue)
         {
-            _suppressChanges = true;
-            try
-            {
-                ApplyPatchInternal(path, 0, newValue);
-            }
-            finally
-            {
-                _suppressChanges = false;
-            }
+            // "Silently" здесь означает "без детектирования по снапшотам",
+            // но не подавляет событие Changed: мы сами поднимаем его внутри.
+            ApplyPatchInternal(path, 0, newValue);
         }
 
         /// <summary>
-        /// Применяет патч с генерацией событий (если нужно).
-        /// Реже используется, обычно достаточно Silently.
+        /// Применяет патч с генерацией событий (то же самое, что ApplyPatchSilently).
+        /// Оставлено для семантики API.
         /// </summary>
         public void ApplyPatch(IReadOnlyList<FieldPathSegment> path, object? newValue)
         {
             ApplyPatchInternal(path, 0, newValue);
         }
 
-        protected override void RaiseChange(FieldChange change)
-        {
-            if (_suppressChanges)
-                return;
-            base.RaiseChange(change);
-        }
-
+        /// <summary>
+        /// Применение патча по пути внутри дерева SyncNode.
+        /// На листе:
+        /// - читается старое значение;
+        /// - устанавливается новое (с конвертацией);
+        /// - при отличии поднимается FieldChange.
+        /// </summary>
         private void ApplyPatchInternal(IReadOnlyList<FieldPathSegment> path, int index, object? newValue)
         {
             var segmentName = path[index].Name;
@@ -61,7 +53,16 @@ namespace Assets.Shared.ChangeDetector
 
             if (isLast)
             {
-                SetMemberValue(member, newValue);
+                // Листовой сегмент: меняем значение и поднимаем FieldChange
+                var oldValue = GetMemberValue(member);
+                var convertedNewValue = SetMemberValueAndReturn(member, newValue);
+
+                if (!Equals(oldValue, convertedNewValue))
+                {
+                    var change = new FieldChange(path, oldValue, convertedNewValue);
+                    // TrackableNode.RaiseChange раздаёт событие наружу (WorldStateMono и пр.)
+                    RaiseChange(change);
+                }
             }
             else
             {
@@ -89,32 +90,37 @@ namespace Assets.Shared.ChangeDetector
             throw new NotSupportedException($"Unsupported member type: {member.MemberType}");
         }
 
-        private void SetMemberValue(MemberInfo member, object? newValue)
+        /// <summary>
+        /// Устанавливает значение поля/свойства с конвертацией и возвращает фактически записанное значение.
+        /// </summary>
+        private object? SetMemberValueAndReturn(MemberInfo member, object? newValue)
         {
             if (member is PropertyInfo pi)
             {
                 var converted = ConvertIfNeeded(newValue, pi.PropertyType);
                 pi.SetValue(this, converted);
+                return converted;
             }
-            else if (member is FieldInfo fi)
+
+            if (member is FieldInfo fi)
             {
                 var converted = ConvertIfNeeded(newValue, fi.FieldType);
                 fi.SetValue(this, converted);
+                return converted;
             }
-            else
-            {
-                throw new NotSupportedException($"Unsupported member type: {member.MemberType}");
-            }
+
+            throw new NotSupportedException($"Unsupported member type: {member.MemberType}");
         }
 
         private object? ConvertIfNeeded(object? value, Type targetType)
         {
             if (value == null)
                 return targetType.IsValueType ? Activator.CreateInstance(targetType) : null;
+
             if (targetType.IsInstanceOfType(value))
                 return value;
+
             return Convert.ChangeType(value, targetType);
         }
     }
-
 }

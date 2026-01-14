@@ -76,7 +76,7 @@ namespace Assets.Scripts.Network.NetCore
             var type = parsed.Item1;
             var payload = parsed.Item2;
 
-            Debug.Log($"[CLIENT] recv packet type={type}, len={payload.Length}");
+            Debug.Log($"[CLIENT] Got packet type = {type}, len = {payload.Length}");
 
             switch (type)
             {
@@ -89,10 +89,9 @@ namespace Assets.Scripts.Network.NetCore
                 case MessageType.Patch:
                     {
                         var patch = _serializer.Deserialize<PatchMessage>(payload);
-                        Debug.Log($"[CLIENT] Patch raw NewValue type = {patch.NewValue?.GetType().FullName ?? "null"}");
+                        //Debug.Log($"[CLIENT] Patch raw NewValue type = {patch.NewValue?.GetType().FullName ?? "null"}");
                         var value = SyncValueConverter.FromDtoIfNeeded(patch.NewValue);
-                        Debug.Log($"[CLIENT] Patch converted NewValue type = {value?.GetType().FullName ?? "null"}");
-
+                        //Debug.Log($"[CLIENT] Patch converted NewValue type = {value?.GetType().FullName ?? "null"}");
                         _worldState.ApplyPatchSilently(patch.Path, value);
                         break;
                     }
