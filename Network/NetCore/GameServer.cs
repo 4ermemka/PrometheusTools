@@ -86,10 +86,10 @@ namespace Assets.Scripts.Network.NetCore
                 case MessageType.Patch:
                     {
                         var patch = _serializer.Deserialize<PatchMessage>(payload);
-                        Debug.Log($"[CLIENT] Patch raw NewValue type = {patch.NewValue?.GetType().FullName ?? "null"}");
+                        Debug.Log($"[SERVER] Patch raw NewValue type = {patch.NewValue?.GetType().FullName ?? "null"}");
 
                         var value = SyncValueConverter.FromDtoIfNeeded(patch.NewValue);
-                        Debug.Log($"[CLIENT] Patch converted NewValue type = {value?.GetType().FullName ?? "null"}");
+                        Debug.Log($"[SERVER] Patch converted NewValue type = {value?.GetType().FullName ?? "null"}");
 
                         _worldState.ApplyPatchSilently(patch.Path, value);
 

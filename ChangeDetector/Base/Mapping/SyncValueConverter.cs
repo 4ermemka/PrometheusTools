@@ -2,7 +2,6 @@
 
 namespace Assets.Shared.ChangeDetector.Base.Mapping
 {
-
     public static class SyncValueConverter
     {
         public static object ToDtoIfNeeded(object value)
@@ -22,15 +21,13 @@ namespace Assets.Shared.ChangeDetector.Base.Mapping
             if (value == null)
                 return null;
 
-            // 1) Если это JObject – сначала преобразуем его в один из DTO, которые знает реестр
+            // 1) Если это JObject – пробуем развернуть в один из известных DTO
             if (value is JObject jObj)
             {
-                // перебираем все известные DTO-типы
                 foreach (var dtoType in SyncValueMapperRegistry.GetAllDtoTypes())
                 {
                     try
                     {
-                        // пробуем десериализовать JObject в этот DTO
                         var dtoInstance = jObj.ToObject(dtoType);
                         if (dtoInstance != null)
                         {
@@ -40,12 +37,12 @@ namespace Assets.Shared.ChangeDetector.Base.Mapping
                     }
                     catch
                     {
-                        // просто пробуем следующий тип
+                        // игнорируем и пробуем следующий тип
                     }
                 }
             }
 
-            // 2) После этого пробуем маппер
+            // 2) После этого пробуем маппер DTO → модель
             var type = value.GetType();
             if (SyncValueMapperRegistry.TryGetMapperForDto(type, out var mapper2))
                 return mapper2.FromDto(value);
@@ -53,6 +50,4 @@ namespace Assets.Shared.ChangeDetector.Base.Mapping
             return value;
         }
     }
-
-
 }
