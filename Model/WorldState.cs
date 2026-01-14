@@ -29,7 +29,7 @@ public sealed class WorldStateMono : MonoBehaviour
     private void OnStateChanged(FieldChange change)
     {
         var pathStr = string.Join(".", change.Path.Select(p => p.Name));
-        Debug.Log($"[WORLD_MONO] Change {pathStr}: {change.OldValue} -> {change.NewValue}");
+        //Debug.Log($"[WORLD_MONO] Change {pathStr}: {change.OldValue} -> {change.NewValue}");
 
         if (change.Path.Count == 1 &&
             change.Path[0].Name == nameof(NetworkedSpriteState.Position) &&

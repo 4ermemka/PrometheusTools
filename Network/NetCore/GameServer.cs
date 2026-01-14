@@ -1,4 +1,5 @@
-﻿using Assets.Shared.ChangeDetector;
+﻿using Assets.Scripts.Network.NetTCP;
+using Assets.Shared.ChangeDetector;
 using Assets.Shared.ChangeDetector.Base.Mapping;
 using System;
 using System.Collections.Generic;
@@ -16,36 +17,16 @@ namespace Assets.Scripts.Network.NetCore
     public sealed class GameServer : IDisposable
     {
         private readonly ITransport _transport;
-        private readonly SyncNode _worldState;
         private readonly IGameSerializer _serializer;
 
-        public GameServer(ITransport transport, SyncNode worldState, IGameSerializer serializer)
+        public GameServer(ITransport transport, IGameSerializer serializer)
         {
             _transport = transport;
-            _worldState = worldState;
             _serializer = serializer;
 
             _transport.Connected += OnClientConnected;
             _transport.Disconnected += OnClientDisconnected;
             _transport.DataReceived += OnDataReceived;
-
-            _worldState.Changed += OnWorldChangedFromHost;
-        }
-
-        private async void OnWorldChangedFromHost(FieldChange change)
-        {
-            // патч от локального хоста → всем клиентам
-            var path = new List<FieldPathSegment>(change.Path);
-            var newValue = SyncValueConverter.ToDtoIfNeeded(change.NewValue);
-
-            var patch = new PatchMessage
-            {
-                Path = path,
-                NewValue = newValue
-            };
-
-            var packet = MakePacket(MessageType.Patch, patch);
-            await _transport.BroadcastAsync(packet, CancellationToken.None);
         }
 
         public Task StartAsync(string address, int port, CancellationToken ct = default)
@@ -56,69 +37,54 @@ namespace Assets.Scripts.Network.NetCore
 
         private async void OnClientConnected(Guid clientId)
         {
-            var snapshot = CreateSnapshotMessage();
-            var packet = MakePacket(MessageType.Snapshot, snapshot);
-            await _transport.SendAsync(clientId, packet, CancellationToken.None);
+            // по новой схеме снапшот тоже берётся НЕ из сервера,
+            // а из того клиента, который считается источником истины.
+            // В минимальном варианте можно вообще не слать снапшот отсюда,
+            // а сделать «pull-схему» (новый клиент просит у выбранного хоста).
         }
 
         private void OnClientDisconnected(Guid clientId)
         {
-            // При необходимости: логика очистки/уведомлений
+            // очистка по желанию
         }
 
         private async void OnDataReceived(Guid clientId, ArraySegment<byte> data)
         {
-            var parsed = ParsePacket(data);
-            var type = parsed.Item1;
-            var payload = parsed.Item2;
-
-            Debug.Log($"[SERVER] packet from {clientId}, type={type}, len={payload.Length}");
+            var (type, payload) = ParsePacket(data);
 
             switch (type)
             {
                 case MessageType.SnapshotRequest:
-                    {
-                        var snapshot = CreateSnapshotMessage();
-                        var packet = MakePacket(MessageType.Snapshot, snapshot);
-                        await _transport.SendAsync(clientId, packet, CancellationToken.None);
-                        break;
-                    }
+                    // по простой схеме сервер вообще не отвечает снапшотом,
+                    // он просто пересылает запрос тому, кто является «источником состояния»
+                    // или вообще не использует SnapshotRequest на этом уровне
+                    break;
+
                 case MessageType.Patch:
                     {
-                        var patch = _serializer.Deserialize<PatchMessage>(payload);
-                        Debug.Log($"[SERVER] Patch raw NewValue type = {patch.NewValue?.GetType().FullName ?? "null"}");
+                        // сервер НЕ десериализует и НЕ применяет патч,
+                        // он просто роутит его всем, кроме отправителя
+                        var packet = new ArraySegment<byte>(data.Array, data.Offset, data.Count);
 
-                        var value = SyncValueConverter.FromDtoIfNeeded(patch.NewValue);
-                        Debug.Log($"[SERVER] Patch converted NewValue type = {value?.GetType().FullName ?? "null"}");
+                        if (_transport is TcpHostTransport hostTransport)
+                            await hostTransport.BroadcastExceptAsync(clientId, packet, CancellationToken.None);
+                        else
+                            await _transport.BroadcastAsync(packet, CancellationToken.None);
 
-                        _worldState.ApplyPatchSilently(patch.Path, value);
-
-                        var packet = MakePacket(MessageType.Patch, patch);
-                        await _transport.BroadcastAsync(packet, CancellationToken.None);
                         break;
                     }
             }
         }
 
-        private SnapshotMessage CreateSnapshotMessage()
-        {
-            var payload = _serializer.Serialize(_worldState); // _worldState : NetworkedSpriteState
-            return new SnapshotMessage { WorldStatePayload = payload };
-        }
+        // MakePacket/ParsePacket можешь вынести в общий helper; серверу они почти не нужны,
+        // он уже получает готовый packet [type][len][payload].
 
-
-        private ArraySegment<byte> MakePacket<T>(MessageType type, T message)
+        public void Dispose()
         {
-            var payload = _serializer.Serialize(message);
-            var result = new byte[1 + 4 + payload.Length];
-            result[0] = (byte)type;
-            var len = payload.Length;
-            result[1] = (byte)(len & 0xFF);
-            result[2] = (byte)((len >> 8) & 0xFF);
-            result[3] = (byte)((len >> 16) & 0xFF);
-            result[4] = (byte)((len >> 24) & 0xFF);
-            Buffer.BlockCopy(payload, 0, result, 5, payload.Length);
-            return new ArraySegment<byte>(result);
+            _transport.Connected -= OnClientConnected;
+            _transport.Disconnected -= OnClientDisconnected;
+            _transport.DataReceived -= OnDataReceived;
+            _transport.Dispose();
         }
 
         private Tuple<MessageType, byte[]> ParsePacket(ArraySegment<byte> data)
@@ -137,16 +103,7 @@ namespace Assets.Scripts.Network.NetCore
 
             return Tuple.Create(type, payload);
         }
-
-        public void Dispose()
-        {
-            _transport.Connected -= OnClientConnected;
-            _transport.Disconnected -= OnClientDisconnected;
-            _transport.DataReceived -= OnDataReceived;
-            _transport.Dispose();
-
-            _worldState.Changed -= OnWorldChangedFromHost;
-        }
     }
+
 
 }
