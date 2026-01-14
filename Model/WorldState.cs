@@ -1,21 +1,38 @@
-using Assets.Shared.ChangeDetector;
-using Assets.Shared.ChangeDetector.Collections;
+п»їusing Assets.Shared.ChangeDetector;
+using UnityEngine;
 
 /// <summary>
-/// Корневое состояние для теста: набор счётчиков по ID.
+/// РћР±С‘СЂС‚РєР° РЅР°Рґ NetworkedSpriteState, РєРѕС‚РѕСЂР°СЏ РІРµС€Р°РµС‚СЃСЏ РЅР° РѕР±СЉРµРєС‚ СЃРѕ СЃРїСЂР°Р№С‚РѕРј.
+/// Р­С‚РѕС‚ MonoBehaviour РѕС‚РІРµС‡Р°РµС‚ Р·Р° СЃРІСЏР·СЊ РјРµР¶РґСѓ Sync-РјРѕРґРµР»СЊСЋ Рё Transform.
 /// </summary>
-public sealed class WorldState : SyncNode
+public sealed class WorldStateMono : MonoBehaviour
 {
-    // Словарь счётчиков: ключом будет условный ID игрока/сущности.
-    [Sync]
-    public SyncDictionary<int, DebugCounter> Counters { get; set; }
+    public NetworkedSpriteState State { get; private set; }
 
-    public WorldState()
+    private void Awake()
     {
-        // TrackableNode/SyncNode сами инициализируют вложенные узлы,
-        // если свойство null и тип не абстрактный.
-        // Но можно явно подстраховаться:
-        if (Counters == null)
-            Counters = new SyncDictionary<int, DebugCounter>();
+        if (State == null)
+        {
+            State = new NetworkedSpriteState();
+            State.Position = transform.position;
+            State.Changed += OnStateChanged;
+        }
+    }
+
+    private void OnDestroy()
+    {
+        if (State != null)
+            State.Changed -= OnStateChanged;
+    }
+
+    private void OnStateChanged(FieldChange change)
+    {
+        if (change.Path.Count == 1 &&
+            change.Path[0].Name == nameof(NetworkedSpriteState.Position) &&
+            change.NewValue is Vector2 v2)
+        {
+            transform.position = new Vector3(v2.x, v2.y, transform.position.z);
+        }
     }
 }
+

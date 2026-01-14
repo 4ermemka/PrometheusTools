@@ -12,13 +12,13 @@ namespace Assets.Scripts.Network.NetCore
     public sealed class GameClient : IDisposable
     {
         private readonly ITransport _transport;
-        private readonly WorldState _worldState;
+        private readonly SyncNode _worldState;
         private readonly IGameSerializer _serializer;
 
         public event Action ConnectedToHost;
         public event Action DisconnectedFromHost;
 
-        public GameClient(ITransport transport, WorldState worldState, IGameSerializer serializer)
+        public GameClient(ITransport transport, SyncNode worldState, IGameSerializer serializer)
         {
             _transport = transport;
             _worldState = worldState;
@@ -28,7 +28,6 @@ namespace Assets.Scripts.Network.NetCore
             _transport.Disconnected += OnDisconnected;
             _transport.DataReceived += OnDataReceived;
 
-            // Локальные изменения → патчи на хост
             _worldState.Changed += OnLocalWorldChanged;
         }
 
@@ -89,13 +88,17 @@ namespace Assets.Scripts.Network.NetCore
 
         private void ApplySnapshot(SnapshotMessage snapshot)
         {
-            // Базовый вариант для отладки: десериализуем новый WorldState.
-            var fresh = _serializer.Deserialize<WorldState>(snapshot.WorldStatePayload);
+            // десериализуем ту же модель, с которой работаем (_worldState : SyncNode)
+            var fresh = _serializer.Deserialize<NetworkedSpriteState>(snapshot.WorldStatePayload);
 
-            // В реальном коде:
-            // - либо заменить ссылку на _worldState во всех потребителях,
-            // - либо пройтись по fresh и применить патчи к текущему _worldState.
-            throw new NotImplementedException();
+            // простой вариант для отладки — применить полные патчи к текущему _worldState:
+            // 1) Position
+            _worldState.ApplyPatchSilently(
+                new List<FieldPathSegment> { new FieldPathSegment(nameof(NetworkedSpriteState.Position)) },
+                fresh.Position
+            );
+
+            // при более сложном WorldState сюда добавишь остальные поля
         }
 
         private ArraySegment<byte> MakePacket<T>(MessageType type, T messageOrEmpty)

@@ -1,3 +1,4 @@
+using Assets.Shared.ChangeDetector;
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -11,10 +12,10 @@ namespace Assets.Scripts.Network.NetCore
     public sealed class GameServer : IDisposable
     {
         private readonly ITransport _transport;
-        private readonly WorldState _worldState;
+        private readonly SyncNode _worldState;
         private readonly IGameSerializer _serializer;
 
-        public GameServer(ITransport transport, WorldState worldState, IGameSerializer serializer)
+        public GameServer(ITransport transport, SyncNode worldState, IGameSerializer serializer)
         {
             _transport = transport;
             _worldState = worldState;
@@ -74,9 +75,10 @@ namespace Assets.Scripts.Network.NetCore
 
         private SnapshotMessage CreateSnapshotMessage()
         {
-            var payload = _serializer.Serialize(_worldState);
+            var payload = _serializer.Serialize(_worldState); // _worldState : NetworkedSpriteState
             return new SnapshotMessage { WorldStatePayload = payload };
         }
+
 
         private ArraySegment<byte> MakePacket<T>(MessageType type, T message)
         {

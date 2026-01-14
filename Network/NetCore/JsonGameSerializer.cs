@@ -9,16 +9,23 @@ namespace Assets.Scripts.Network.NetCore
     /// </summary>
     public sealed class JsonGameSerializer : IGameSerializer
     {
+        private static readonly JsonSerializerSettings Settings = new JsonSerializerSettings
+        {
+            ReferenceLoopHandling = ReferenceLoopHandling.Ignore,
+            // Можно добавить:
+            // TypeNameHandling = TypeNameHandling.Auto
+        };
+
         public byte[] Serialize<T>(T obj)
         {
-            var json = JsonConvert.SerializeObject(obj);
+            var json = JsonConvert.SerializeObject(obj, Settings);
             return Encoding.UTF8.GetBytes(json);
         }
 
         public T Deserialize<T>(byte[] bytes)
         {
             var json = Encoding.UTF8.GetString(bytes);
-            return JsonConvert.DeserializeObject<T>(json);
+            return JsonConvert.DeserializeObject<T>(json, Settings);
         }
     }
 }
