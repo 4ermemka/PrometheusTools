@@ -1,5 +1,6 @@
-using Assets.Shared.ChangeDetector;
+п»їusing Assets.Shared.ChangeDetector;
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -8,8 +9,8 @@ using UnityEngine;
 namespace Assets.Scripts.Network.NetCore
 {
     /// <summary>
-    /// Авторитетный сервер (хост), принимающий патчи от клиентов и рассылающий их всем.
-    /// Работает только с Snapshot и Patch, без "команд".
+    /// РђРІС‚РѕСЂРёС‚РµС‚РЅС‹Р№ СЃРµСЂРІРµСЂ (С…РѕСЃС‚), РїСЂРёРЅРёРјР°СЋС‰РёР№ РїР°С‚С‡Рё РѕС‚ РєР»РёРµРЅС‚РѕРІ Рё СЂР°СЃСЃС‹Р»Р°СЋС‰РёР№ РёС… РІСЃРµРј.
+    /// Р Р°Р±РѕС‚Р°РµС‚ С‚РѕР»СЊРєРѕ СЃ Snapshot Рё Patch, Р±РµР· "РєРѕРјР°РЅРґ".
     /// </summary>
     public sealed class GameServer : IDisposable
     {
@@ -26,6 +27,20 @@ namespace Assets.Scripts.Network.NetCore
             _transport.Connected += OnClientConnected;
             _transport.Disconnected += OnClientDisconnected;
             _transport.DataReceived += OnDataReceived;
+
+            _worldState.Changed += OnWorldChangedFromHost;
+        }
+
+        private async void OnWorldChangedFromHost(FieldChange change)
+        {
+            // РїР°С‚С‡ РѕС‚ Р»РѕРєР°Р»СЊРЅРѕРіРѕ С…РѕСЃС‚Р° в†’ РІСЃРµРј РєР»РёРµРЅС‚Р°Рј
+            var patch = new PatchMessage
+            {
+                Path = new List<FieldPathSegment>(change.Path),
+                NewValue = change.NewValue
+            };
+            var packet = MakePacket(MessageType.Patch, patch);
+            await _transport.BroadcastAsync(packet, CancellationToken.None);
         }
 
         public Task StartAsync(string address, int port, CancellationToken ct = default)
@@ -43,7 +58,7 @@ namespace Assets.Scripts.Network.NetCore
 
         private void OnClientDisconnected(Guid clientId)
         {
-            // При необходимости: логика очистки/уведомлений
+            // РџСЂРё РЅРµРѕР±С…РѕРґРёРјРѕСЃС‚Рё: Р»РѕРіРёРєР° РѕС‡РёСЃС‚РєРё/СѓРІРµРґРѕРјР»РµРЅРёР№
         }
 
         private async void OnDataReceived(Guid clientId, ArraySegment<byte> data)
@@ -123,6 +138,8 @@ namespace Assets.Scripts.Network.NetCore
             _transport.Disconnected -= OnClientDisconnected;
             _transport.DataReceived -= OnDataReceived;
             _transport.Dispose();
+
+            _worldState.Changed -= OnWorldChangedFromHost;
         }
     }
 
