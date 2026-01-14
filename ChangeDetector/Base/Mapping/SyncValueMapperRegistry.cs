@@ -7,12 +7,18 @@ namespace Assets.Shared.ChangeDetector.Base.Mapping
     public static class SyncValueMapperRegistry
     {
         private static readonly Dictionary<Type, ISyncValueMapper> _modelToMapper =
-            new Dictionary<Type, ISyncValueMapper>();
+        new Dictionary<Type, ISyncValueMapper>();
 
         private static readonly Dictionary<Type, ISyncValueMapper> _dtoToMapper =
             new Dictionary<Type, ISyncValueMapper>();
 
         private static bool _initialized;
+
+        public static IEnumerable<Type> GetAllDtoTypes()
+        {
+            EnsureInitialized();
+            return _dtoToMapper.Keys;
+        }
 
         public static void EnsureInitialized()
         {

@@ -12,8 +12,7 @@ namespace Assets.Scripts.Network.NetCore
         private static readonly JsonSerializerSettings Settings = new JsonSerializerSettings
         {
             ReferenceLoopHandling = ReferenceLoopHandling.Ignore,
-            // Можно добавить:
-            // TypeNameHandling = TypeNameHandling.Auto
+            TypeNameHandling = TypeNameHandling.Auto // или All
         };
 
         public byte[] Serialize<T>(T obj)

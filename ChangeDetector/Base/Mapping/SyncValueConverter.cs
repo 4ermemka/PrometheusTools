@@ -1,11 +1,10 @@
-﻿using System.Collections;
-using UnityEngine;
+﻿using Newtonsoft.Json.Linq;
 
 namespace Assets.Shared.ChangeDetector.Base.Mapping
 {
+
     public static class SyncValueConverter
     {
-        // модель → то, что кладём в PatchMessage.NewValue
         public static object ToDtoIfNeeded(object value)
         {
             if (value == null)
@@ -13,23 +12,47 @@ namespace Assets.Shared.ChangeDetector.Base.Mapping
 
             var type = value.GetType();
             if (SyncValueMapperRegistry.TryGetMapperForModel(type, out var mapper))
-                return mapper.ToDto(value); // вернёт DTO (например, Vector2Dto)
+                return mapper.ToDto(value);
 
-            return value; // без маппинга
+            return value;
         }
 
-        // значение из PatchMessage.NewValue → модель
         public static object FromDtoIfNeeded(object value)
         {
             if (value == null)
                 return null;
 
+            // 1) Если это JObject – сначала преобразуем его в один из DTO, которые знает реестр
+            if (value is JObject jObj)
+            {
+                // перебираем все известные DTO-типы
+                foreach (var dtoType in SyncValueMapperRegistry.GetAllDtoTypes())
+                {
+                    try
+                    {
+                        // пробуем десериализовать JObject в этот DTO
+                        var dtoInstance = jObj.ToObject(dtoType);
+                        if (dtoInstance != null)
+                        {
+                            value = dtoInstance;
+                            break;
+                        }
+                    }
+                    catch
+                    {
+                        // просто пробуем следующий тип
+                    }
+                }
+            }
+
+            // 2) После этого пробуем маппер
             var type = value.GetType();
-            if (SyncValueMapperRegistry.TryGetMapperForDto(type, out var mapper))
-                return mapper.FromDto(value); // вернёт модельный тип (например, Vector2)
+            if (SyncValueMapperRegistry.TryGetMapperForDto(type, out var mapper2))
+                return mapper2.FromDto(value);
 
             return value;
         }
     }
+
 
 }
