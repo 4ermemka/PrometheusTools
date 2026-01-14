@@ -1,7 +1,9 @@
 using Assets.Shared.ChangeDetector;
 using System;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using UnityEngine;
 
 namespace Assets.Scripts.Network.NetCore
 {
@@ -50,6 +52,8 @@ namespace Assets.Scripts.Network.NetCore
             var type = parsed.Item1;
             var payload = parsed.Item2;
 
+            Debug.Log($"[SERVER] packet from {clientId}, type={type}, len={payload.Length}");
+
             switch (type)
             {
                 case MessageType.SnapshotRequest:
@@ -62,8 +66,10 @@ namespace Assets.Scripts.Network.NetCore
                 case MessageType.Patch:
                     {
                         var patch = _serializer.Deserialize<PatchMessage>(payload);
+                        var pathStr = string.Join(".", patch.Path.Select(p => p.Name));
 
-                        // TODO: CanClientChangePath(clientId, patch.Path)
+                        Debug.Log($"[SERVER] Apply patch {pathStr}: {patch.NewValue}");
+
                         _worldState.ApplyPatchSilently(patch.Path, patch.NewValue);
 
                         var packet = MakePacket(MessageType.Patch, patch);
