@@ -9,6 +9,6 @@ namespace Assets.Shared.Model
     public sealed class WorldData : SyncNode
     {
         [Sync]
-        public SyncList<BoxData> Boxes = new SyncList<BoxData>();
+        public BoxData Box = new BoxData();
     }
 }

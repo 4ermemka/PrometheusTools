@@ -153,30 +153,30 @@ namespace Assets.Scripts.Network.NetCore
             // Простейший способ: заменить содержимое старого WorldData данными из newWorldData.
             // Важно не менять сам объект _worldState, чтобы не ломать ссылки у ChangeDetector и BoxView.
 
-            if (_worldState is WorldData worldData)
-            {
-                // Очищаем и копируем список коробок.
-                worldData.Boxes.Clear();
-
-                foreach (var box in newWorldData.Boxes)
-                {
-                    // Можно либо копировать объекты, либо класть их как есть.
-                    // Для простоты: создаём новые, чтобы избежать неожиданных ссылок.
-                    var copy = new BoxData
-                    {
-                        Position = box.Position
-                        // здесь же копировать остальные поля, если появятся
-                    };
-                    worldData.Boxes.Add(copy);
-                }
+            //if (_worldState is WorldData worldData)
+            //{
+            //    // Очищаем и копируем список коробок.
+            //    worldData.Box.Position = newWorldData.Position;
+//
+            //    foreach (var box in newWorldData.Boxes)
+            //    {
+            //        // Можно либо копировать объекты, либо класть их как есть.
+            //        // Для простоты: создаём новые, чтобы избежать неожиданных ссылок.
+            //        var copy = new BoxData
+            //        {
+            //            Position = box.Position
+            //            // здесь же копировать остальные поля, если появятся
+            //        };
+            //        worldData.Boxes.Add(copy);
+            //    }
 
                 // После такого обновления ChangeDetector сам поднимет Changed для затронутых полей,
                 // а BoxView в LateUpdate/Update подтянет позиции.
-            }
-            else
-            {
-                Debug.LogWarning("[CLIENT] ApplySnapshot: _worldState не является WorldData.");
-            }
+            //}
+            //else
+            //{
+            //    Debug.LogWarning("[CLIENT] ApplySnapshot: _worldState не является WorldData.");
+            //}
         }
 
         /// <summary>
@@ -198,7 +198,7 @@ namespace Assets.Scripts.Network.NetCore
                 NewValue = newValue
             };
 
-            Debug.LogError($"[CLIENT] MakePacket patch to send: {patch.Path}: {patch.NewValue}");
+            Debug.Log($"[CLIENT] MakePacket patch to send: {patch.Path}: {patch.NewValue}");
 
             ArraySegment<byte> packet;
             try
