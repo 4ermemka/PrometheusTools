@@ -4,6 +4,7 @@ using Assets.Shared.Model;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
@@ -28,9 +29,6 @@ namespace Assets.Scripts.Network.NetCore
 
         // Очередь действий, которые нужно выполнить на главном потоке (снапшоты и т.п.).
         private readonly ConcurrentQueue<Action> _mainThreadActions = new();
-
-        // Флаг: сейчас применяем удалённый патч и не должны реагировать на Changed как на локальное изменение.
-        private bool _isApplyingRemotePatch;
 
         public event Action ConnectedToHost;
         public event Action DisconnectedFromHost;
@@ -126,16 +124,8 @@ namespace Assets.Scripts.Network.NetCore
             while (_incomingPatches.TryDequeue(out var patch))
             {
                 var value = SyncValueConverter.FromDtoIfNeeded(patch.NewValue);
-
-                _isApplyingRemotePatch = true;
-                try
-                {
-                    _worldState.ApplyPatchSilently(patch.Path, value);
-                }
-                finally
-                {
-                    _isApplyingRemotePatch = false;
-                }
+                Debug.Log($"[GameClient] Applying patch: {patch.Path} -> {patch.NewValue}");
+                _worldState.ApplyPatchSilently(patch.Path, value);
             }
 
             // 2. Выполняем отложенные действия (например, применение снапшота)
@@ -194,11 +184,9 @@ namespace Assets.Scripts.Network.NetCore
         /// </summary>
         private async void OnLocalWorldChanged(FieldChange change)
         {
-            // Если изменение пришло из сети, мы его уже обработали, не шлём его обратно.
-            if (_isApplyingRemotePatch)
-                return;
-
+            Debug.Log($"[CLIENT] OnLocalWorldChanged: path={string.Join(".", change.Path.Select(p => p.Name))} ");
             if (_serializer == null || _transport == null)
+            
                 return;
 
             var path = new List<FieldPathSegment>(change.Path);
@@ -209,6 +197,8 @@ namespace Assets.Scripts.Network.NetCore
                 Path = path,
                 NewValue = newValue
             };
+
+            Debug.LogError($"[CLIENT] MakePacket patch to send: {patch.Path}: {patch.NewValue}");
 
             ArraySegment<byte> packet;
             try

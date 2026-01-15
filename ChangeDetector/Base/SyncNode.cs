@@ -10,6 +10,8 @@ namespace Assets.Shared.ChangeDetector
     /// </summary>
     public abstract class SyncNode : TrackableNode
     {
+        //public event Action<FieldChange>? Patched;
+        public event Action? Patched;
         /// <summary>
         /// Применяет патч с генерацией событий Changed (если значение реально изменилось).
         /// Используется для входящих сетевых патчей и снапшотов.
@@ -53,15 +55,19 @@ namespace Assets.Shared.ChangeDetector
 
             if (isLast)
             {
-                // Листовой сегмент: меняем значение и поднимаем FieldChange
+                // лист: меняем значение и создаём FieldChange
                 var oldValue = GetMemberValue(member);
                 var convertedNewValue = SetMemberValueAndReturn(member, newValue);
 
                 if (!Equals(oldValue, convertedNewValue))
                 {
                     var change = new FieldChange(path, oldValue, convertedNewValue);
-                    // TrackableNode.RaiseChange раздаёт событие наружу (WorldStateMono и пр.)
+
+                    // 1) общее событие Changed (для GameClient → патчи и пр.)
                     RaiseChange(change);
+
+                    //Patched?.Invoke(change);
+                    Patched?.Invoke();
                 }
             }
             else
