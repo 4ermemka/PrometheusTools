@@ -1,4 +1,5 @@
 ﻿using Assets.Shared.ChangeDetector;
+using Assets.Shared.ChangeDetector.Collections;
 using System;
 using System.Collections.Generic;
 
@@ -7,6 +8,7 @@ namespace Assets.Shared.Model
     [Serializable]
     public sealed class WorldData : SyncNode
     {
-        public List<BoxData> Boxes = new List<BoxData>();
+        [Sync]
+        public SyncList<BoxData> Boxes = new SyncList<BoxData>();
     }
 }

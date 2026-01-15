@@ -45,11 +45,35 @@ namespace Assets.Shared.ChangeDetector
                 if (member is PropertyInfo pi)
                 {
                     memberType = pi.PropertyType;
-                    if (!pi.CanRead) continue;
-                    getter = () => pi.GetValue(this);
+                    if (!pi.CanRead)
+                        continue;
+
+                    // пропускаем все индексаторы и свойства с параметрами
+                    var indexParams = pi.GetIndexParameters();
+                    if (indexParams != null && indexParams.Length > 0)
+                        continue;
+
+                    var getterMethod = pi.GetGetMethod(true);
+                    if (getterMethod == null)
+                        continue;
+
+                    // геттер без параметров
+                    getter = () => getterMethod.Invoke(this, Array.Empty<object>());
+
                     if (pi.CanWrite)
-                        setter = v => pi.SetValue(this, v);
+                    {
+                        var setterMethod = pi.GetSetMethod(true);
+                        if (setterMethod != null)
+                        {
+                            var setterParams = setterMethod.GetParameters();
+                            if (setterParams.Length == 1)
+                            {
+                                setter = v => setterMethod.Invoke(this, new[] { v });
+                            }
+                        }
+                    }
                 }
+
                 else if (member is FieldInfo fi)
                 {
                     memberType = fi.FieldType;
