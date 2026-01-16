@@ -5,39 +5,28 @@ using System.Reflection;
 namespace Assets.Shared.ChangeDetector
 {
     /// <summary>
-    /// Расширение TrackableNode, которое умеет применять входящие патчи по пути.
-    /// Используется на принимающей стороне (клиенты и хост, принимающий патчи от других).
+    /// Узел, который умеет применять входящие патчи по пути.
+    /// Не поднимает Changed, только своё событие Patched.
     /// </summary>
     public abstract class SyncNode : TrackableNode
     {
-        //public event Action<FieldChange>? Patched;
-        public event Action? Patched;
         /// <summary>
-        /// Применяет патч с генерацией событий Changed (если значение реально изменилось).
-        /// Используется для входящих сетевых патчей и снапшотов.
+        /// Срабатывает, когда к узлу был применён патч (или снапшот).
+        /// Не предназначено для отправки исходящих патчей.
         /// </summary>
-        public void ApplyPatchSilently(IReadOnlyList<FieldPathSegment> path, object? newValue)
-        {
-            // "Silently" здесь означает "без детектирования по снапшотам",
-            // но не подавляет событие Changed: мы сами поднимаем его внутри.
-            ApplyPatchInternal(path, 0, newValue);
-        }
+        public event Action? Patched;
 
         /// <summary>
-        /// Применяет патч с генерацией событий (то же самое, что ApplyPatchSilently).
-        /// Оставлено для семантики API.
+        /// Применяет патч по пути без генерации Changed.
         /// </summary>
         public void ApplyPatch(IReadOnlyList<FieldPathSegment> path, object? newValue)
         {
             ApplyPatchInternal(path, 0, newValue);
+            Patched?.Invoke();
         }
 
         /// <summary>
-        /// Применение патча по пути внутри дерева SyncNode.
-        /// На листе:
-        /// - читается старое значение;
-        /// - устанавливается новое (с конвертацией);
-        /// - при отличии поднимается FieldChange.
+        /// Технический рекурсивный проход по пути.
         /// </summary>
         private void ApplyPatchInternal(IReadOnlyList<FieldPathSegment> path, int index, object? newValue)
         {
@@ -45,7 +34,7 @@ namespace Assets.Shared.ChangeDetector
             var type = GetType();
             var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
-            var member = (MemberInfo)type.GetProperty(segmentName, flags)
+            var member = (MemberInfo?)type.GetProperty(segmentName, flags)
                          ?? type.GetField(segmentName, flags);
 
             if (member == null)
@@ -55,20 +44,7 @@ namespace Assets.Shared.ChangeDetector
 
             if (isLast)
             {
-                // лист: меняем значение и создаём FieldChange
-                var oldValue = GetMemberValue(member);
-                var convertedNewValue = SetMemberValueAndReturn(member, newValue);
-
-                if (!Equals(oldValue, convertedNewValue))
-                {
-                    var change = new FieldChange(path, oldValue, convertedNewValue);
-
-                    // 1) общее событие Changed (для GameClient → патчи и пр.)
-                    RaiseChange(change);
-
-                    //Patched?.Invoke(change);
-                    Patched?.Invoke();
-                }
+                SetMemberValue(member, newValue);
             }
             else
             {
@@ -96,23 +72,20 @@ namespace Assets.Shared.ChangeDetector
             throw new NotSupportedException($"Unsupported member type: {member.MemberType}");
         }
 
-        /// <summary>
-        /// Устанавливает значение поля/свойства с конвертацией и возвращает фактически записанное значение.
-        /// </summary>
-        private object? SetMemberValueAndReturn(MemberInfo member, object? newValue)
+        private void SetMemberValue(MemberInfo member, object? newValue)
         {
             if (member is PropertyInfo pi)
             {
                 var converted = ConvertIfNeeded(newValue, pi.PropertyType);
                 pi.SetValue(this, converted);
-                return converted;
+                return;
             }
 
             if (member is FieldInfo fi)
             {
                 var converted = ConvertIfNeeded(newValue, fi.FieldType);
                 fi.SetValue(this, converted);
-                return converted;
+                return;
             }
 
             throw new NotSupportedException($"Unsupported member type: {member.MemberType}");

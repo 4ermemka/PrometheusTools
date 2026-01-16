@@ -125,7 +125,7 @@ namespace Assets.Scripts.Network.NetCore
             {
                 var value = SyncValueConverter.FromDtoIfNeeded(patch.NewValue);
                 Debug.Log($"[GameClient] Applying patch: {patch.Path} -> {patch.NewValue}");
-                _worldState.ApplyPatchSilently(patch.Path, value);
+                _worldState.ApplyPatch(patch.Path, value);
             }
 
             // 2. Выполняем отложенные действия (например, применение снапшота)
