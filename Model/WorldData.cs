@@ -1,14 +1,18 @@
 ﻿using Assets.Shared.ChangeDetector;
-using Assets.Shared.ChangeDetector.Collections;
 using System;
-using System.Collections.Generic;
 
 namespace Assets.Shared.Model
 {
     [Serializable]
     public sealed class WorldData : SyncNode
     {
+        private BoxData _boxData;
+
         [Sync]
-        public BoxData Box = new BoxData();
+        public BoxData BoxData
+        {
+            get => _boxData;
+            set => SetProperty(ref _boxData, value);
+        }
     }
 }
