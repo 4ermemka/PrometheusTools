@@ -7,7 +7,10 @@ namespace Assets.Shared.ChangeDetector.Collections
     /// <summary>
     /// Список с поддержкой трекинга и применения патчей.
     /// </summary>
-    public sealed class SyncList<TItem> : SyncNode, IList<TItem>, ITrackableCollection
+    public sealed class SyncList<TItem> : SyncNode,
+        IList<TItem>,
+        ITrackableCollection,
+        ISyncIndexableCollection
     {
         private readonly List<TItem> _inner = new();
 
@@ -32,6 +35,26 @@ namespace Assets.Shared.ChangeDetector.Collections
                 RaiseLocalChange($"[{index}]", old, value);
             }
         }
+
+        object? ISyncIndexableCollection.GetElement(string segmentName)
+        {
+            if (!TryParseIndex(segmentName, out var index))
+                throw new InvalidOperationException($"Invalid index segment '{segmentName}' for SyncList.");
+
+            return _inner[index];
+        }
+
+        void ISyncIndexableCollection.SetElement(string segmentName, object? value)
+        {
+            if (!TryParseIndex(segmentName, out var index))
+                throw new InvalidOperationException($"Invalid index segment '{segmentName}' for SyncList.");
+
+            var elementType = typeof(TItem);
+            var converted = (TItem?)ConvertIfNeeded(value, elementType);
+            _inner[index] = converted!;
+        }
+
+        int ISyncIndexableCollection.Count => _inner.Count;
 
         public int Count => _inner.Count;
         public bool IsReadOnly => false;
@@ -198,23 +221,34 @@ namespace Assets.Shared.ChangeDetector.Collections
                         break;
                     }
                 case CollectionOpKind.Clear:
-                    // Тихий clear
-                    foreach (var it in _inner)
-                        UnwireChild(it);
-                    _inner.Clear();
-                    _childHandlers.Clear();
-                    break;
-
+                    {
+                        foreach (var it in _inner)
+                            UnwireChild(it);
+                        _inner.Clear();
+                        _childHandlers.Clear();
+                        break;
+                    }
                 case CollectionOpKind.Move:
                     {
                         var (from, to) = (ValueTuple<int, int>)change.KeyOrIndex!;
                         var item = _inner[from];
-                        // Move тоже делаем «тихим».
                         _inner.RemoveAt(from);
                         _inner.Insert(to, item);
                         break;
                     }
             }
+        }
+
+        private static bool TryParseIndex(string segmentName, out int index)
+        {
+            if (!string.IsNullOrEmpty(segmentName) &&
+                segmentName[0] == '[' &&
+                segmentName[^1] == ']')
+            {
+                segmentName = segmentName.Substring(1, segmentName.Length - 2);
+            }
+
+            return int.TryParse(segmentName, out index);
         }
 
         private object? ConvertIfNeeded(object? value, Type targetType)
@@ -224,6 +258,13 @@ namespace Assets.Shared.ChangeDetector.Collections
             if (targetType.IsInstanceOfType(value))
                 return value;
             return Convert.ChangeType(value, targetType);
+        }
+
+        // Явные реализации IList<T> (требуются, если где-то нужны именно интерфейсы)
+        TItem IList<TItem>.this[int index]
+        {
+            get => this[index];
+            set => this[index] = value;
         }
     }
 }

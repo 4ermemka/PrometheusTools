@@ -132,49 +132,19 @@ namespace Assets.Shared.ChangeDetector
             var type = GetType();
             var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
-            // 1. Если текущий объект — список, и сегмент — индекс, обрабатываем как элемент списка
-            if (this is IList list && TryParseIndex(segmentName, out var elementIndex))
+            // 1. Попытка коллекционного шага, если текущий узел сам коллекция
+            if (this is ISyncIndexableCollection selfCollection && index < path.Count - 1)
             {
-                bool isLeaf = index == path.Count - 1;
-
-                if (elementIndex < 0 || elementIndex >= list.Count)
-                    throw new IndexOutOfRangeException(
-                        $"Index {elementIndex} is out of range for list on '{type.Name}'.");
-
-                if (isLeaf)
-                {
-                    // Лист: заменяем элемент целиком
-                    var elementType = list.GetType().IsGenericType
-                        ? list.GetType().GetGenericArguments()[0]
-                        : typeof(object);
-
-                    var converted = ConvertIfNeeded(newValue, elementType);
-                    list[elementIndex] = converted;
-                    Patched?.Invoke();
-                    return;
-                }
-                else
-                {
-                    // Спускаемся в элемент по индексу
-                    var item = list[elementIndex];
-                    if (item is SyncNode childSync)
-                    {
-                        childSync.ApplyPatchInternal(path, index + 1, newValue);
-                        return;
-                    }
-
-                    throw new InvalidOperationException(
-                        $"List element at index {elementIndex} on '{type.Name}' is not SyncNode; cannot continue path.");
-                }
+                ApplyPatchIntoCollection(selfCollection, path, index, newValue);
+                return;
             }
 
-            // 2. Обычный путь по полям/свойствам (НЕ для индексов)
+            // 2. Обычный путь по полям/свойствам
             FieldInfo? backingField = null;
             if (!string.IsNullOrEmpty(segmentName))
             {
                 var backingFieldName =
                     "_" + char.ToLowerInvariant(segmentName[0]) + segmentName.Substring(1);
-
                 backingField = type.GetField(backingFieldName, flags);
             }
 
@@ -203,10 +173,9 @@ namespace Assets.Shared.ChangeDetector
             {
                 var childValue = GetMemberValue(member, this);
 
-                // Коллекции, которые объявлены как поля/свойства (SyncList и т.п.)
-                if (childValue is ITrackableCollection trackableCollection)
+                if (childValue is ISyncIndexableCollection collection)
                 {
-                    ApplyPatchIntoCollection(trackableCollection, path, index + 1, newValue);
+                    ApplyPatchIntoCollection(collection, path, index + 1, newValue);
                 }
                 else if (childValue is SyncNode childSync)
                 {
@@ -215,7 +184,7 @@ namespace Assets.Shared.ChangeDetector
                 else
                 {
                     throw new InvalidOperationException(
-                        $"Member '{segmentName}' on '{type.Name}' is not SyncNode or ITrackableCollection; cannot continue path.");
+                        $"Member '{segmentName}' on '{type.Name}' is not SyncNode or ISyncIndexableCollection; cannot continue path.");
                 }
             }
         }
