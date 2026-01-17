@@ -76,14 +76,21 @@ namespace Assets.Shared.ChangeDetector
                     valueSource is SyncNode childSource &&
                     valueTarget is SyncNode childTarget)
                 {
-                    // Вложенный SyncNode: рекурсивно внутрь.
+                    // защита от рекурсивного "BoxData.BoxData"
+                    if (memberType == type)
+                    {
+                        // это самореферентное поле/свойство, пропускаем
+                        path.RemoveAt(path.Count - 1);
+                        continue;
+                    }
+
                     ApplySnapshotRecursive(childTarget, childSource, path);
                 }
                 else
                 {
-                    // Лист: применяем через ApplyPatch, который пишет в backing-field.
                     target.ApplyPatch(path, valueSource);
                 }
+
 
                 path.RemoveAt(path.Count - 1);
             }
@@ -99,7 +106,7 @@ namespace Assets.Shared.ChangeDetector
             var type = GetType();
             var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
-            // Пытаемся найти backing-field по конвенции: BoxData -> _boxData
+            // сначала backing-field: _boxData
             FieldInfo? backingField = null;
             if (!string.IsNullOrEmpty(segmentName))
             {
@@ -110,7 +117,6 @@ namespace Assets.Shared.ChangeDetector
             }
 
             MemberInfo member;
-
             if (backingField != null)
             {
                 member = backingField;
@@ -123,29 +129,6 @@ namespace Assets.Shared.ChangeDetector
                              $"Member '{segmentName}' not found on '{type.Name}'.");
             }
 
-            bool isLast = index == path.Count - 1;
-
-            if (isLast)
-            {
-                // Лист: пишем значение в backing-field / поле / свойство.
-                SetMemberValue(member, newValue);
-
-                Patched?.Invoke();
-            }
-            else
-            {
-                var childValue = GetMemberValue(member, this);
-
-                if (childValue is SyncNode childSync)
-                {
-                    childSync.ApplyPatchInternal(path, index + 1, newValue);
-                }
-                else
-                {
-                    throw new InvalidOperationException(
-                        $"Member '{segmentName}' on '{type.Name}' is not SyncNode; cannot continue path.");
-                }
-            }
         }
 
         private static Type GetMemberType(MemberInfo member) =>
