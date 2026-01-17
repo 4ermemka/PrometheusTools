@@ -1,9 +1,8 @@
-﻿using System;
+﻿using Assets.Shared.ChangeDetector.Collections;
+using Newtonsoft.Json;
+using System;
 using System.Collections.Generic;
 using System.Reflection;
-using Assets.Shared.ChangeDetector.Collections;
-using UnityEngine;
-
 namespace Assets.Shared.ChangeDetector
 {
     /// <summary>
@@ -15,12 +14,14 @@ namespace Assets.Shared.ChangeDetector
         /// <summary>
         /// Срабатывает при применении входящего патча (точечное изменение).
         /// </summary>
+        [JsonIgnore]
         public Action? Patched;
 
         /// <summary>
         /// Срабатывает один раз после применения полного снапшота к этому узлу.
         /// Используется для переподписки на заменённые объекты.
         /// </summary>
+        [JsonIgnore]
         public Action? SnapshotApplied;
 
         /// <summary>
