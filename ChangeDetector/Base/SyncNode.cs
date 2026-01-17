@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Reflection;
+using UnityEngine;
 
 namespace Assets.Shared.ChangeDetector
 {
@@ -64,6 +65,11 @@ namespace Assets.Shared.ChangeDetector
 
                 var valueSource = GetMemberValue(member, source);
                 var valueTarget = GetMemberValue(member, target);
+
+                if (valueSource == null && typeof(SyncNode).IsAssignableFrom(memberType))
+                {
+                    Debug.LogWarning($"[SyncNode] GetMemberValue returned null for {type.Name}.{member.Name}");
+                }
 
                 // добавляем сегмент имени члена
                 path.Add(new FieldPathSegment(member.Name));
@@ -178,13 +184,36 @@ namespace Assets.Shared.ChangeDetector
                 _ => throw new NotSupportedException($"Unsupported member type: {member.MemberType}")
             };
 
-        private static object? GetMemberValue(MemberInfo member, object instance) =>
-            member switch
+        private static object? GetMemberValue(MemberInfo member, object instance)
+        {
+            switch (member)
             {
-                PropertyInfo pi => pi.GetValue(instance),
-                FieldInfo fi => fi.GetValue(instance),
-                _ => throw new NotSupportedException($"Unsupported member type: {member.MemberType}")
-            };
+                case PropertyInfo pi:
+                    {
+                        // Защита от "нестандартных" геттеров, которые ломают CreateDelegate внутри GetValue
+                        var getter = pi.GetGetMethod(true);
+                        if (getter == null)
+                            return null;
+
+                        // Индексаторы и прочие с параметрами — не трогаем
+                        if (getter.GetParameters().Length > 0)
+                            return null;
+
+                        // Если тип declaring/target не совпадает, тоже лучше пропустить
+                        if (getter.IsStatic)
+                            return getter.Invoke(null, Array.Empty<object>());
+
+                        return getter.Invoke(instance, Array.Empty<object>());
+                    }
+
+                case FieldInfo fi:
+                    return fi.GetValue(instance);
+
+                default:
+                    throw new NotSupportedException($"Unsupported member type: {member.MemberType}");
+            }
+        }
+
 
         private object? ConvertIfNeeded(object? value, Type targetType)
         {
