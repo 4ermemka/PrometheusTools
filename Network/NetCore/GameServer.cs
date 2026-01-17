@@ -2,6 +2,7 @@
 using Assets.Shared.ChangeDetector;
 using Assets.Shared.ChangeDetector.Base.Mapping;
 using Assets.Shared.Network.NetCore;
+using Assets.Shared.Network.NetCore.Messages;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -43,18 +44,22 @@ namespace Assets.Scripts.Network.NetCore
         public Task StopAsync(CancellationToken ct = default)
             => _transport.StopAsync(ct);
 
-        private void OnClientConnected(Guid clientId)
+        private async void OnClientConnected(Guid clientId)
         {
             _clients.Add(clientId);
 
-            // Первый подключившийся клиент становится хостом
             if (_hostClientId == Guid.Empty)
             {
                 _hostClientId = clientId;
                 Debug.Log($"[SERVER] Host client set to {clientId}");
             }
 
-            Debug.Log($"[SERVER] Client connected: {clientId}");
+            var isHost = clientId == _hostClientId;
+            var handshake = new HandshakeMessage { IsHost = isHost };
+            var payload = _serializer.Serialize(handshake);
+            var packet = MakePacket(MessageType.Handshake, payload);
+
+            await _transport.SendAsync(clientId, packet, CancellationToken.None);
         }
 
         private void OnClientDisconnected(Guid clientId)

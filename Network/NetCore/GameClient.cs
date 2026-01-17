@@ -2,6 +2,7 @@
 using Assets.Shared.ChangeDetector.Base.Mapping;
 using Assets.Shared.Model;
 using Assets.Shared.Network.NetCore;
+using Assets.Shared.Network.NetCore.Messages;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -33,6 +34,7 @@ namespace Assets.Scripts.Network.NetCore
 
         public event Action ConnectedToHost;
         public event Action DisconnectedFromHost;
+        private bool _isHost;
 
         public GameClient(ITransport transport, SyncNode worldState, IGameSerializer serializer)
         {
@@ -55,43 +57,26 @@ namespace Assets.Scripts.Network.NetCore
         public async Task ConnectAsync(string address, int port, CancellationToken ct)
         {
             await _transport.StartAsync(address, port, ct);
-            await SendSnapshotRequest();
+            // Никаких SnapshotRequest отсюда не шлём.
         }
 
-        private async Task SendSnapshotRequest()
+        public async Task RequestSnapshotAsync()
         {
             var request = new SnapshotRequestMessage
             {
-                // На клиенте мы пока не знаем ничего про RequestorClientId, сервер сам его проставит.
-                RequestorClientId = Guid.Empty
+                RequestorClientId = Guid.Empty // сервер сам проставит реальный id
             };
 
             var packet = MakePacket(MessageType.SnapshotRequest, request);
 
             try
             {
-                // Для серверного транспорта Guid.Empty обычно означает "на сервер".
                 await _transport.SendAsync(Guid.Empty, packet, CancellationToken.None);
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[CLIENT] SendSnapshotRequest failed: {ex}");
+                Debug.LogError($"[CLIENT] RequestSnapshotAsync failed: {ex}");
             }
-        }
-
-        private void HandleSnapshotRequest(SnapshotRequestMessage request)
-        {
-            // Сериализуем WorldData в byte[]
-            var worldBytes = _serializer.Serialize(_worldState); // _worldState — WorldData : SyncNode
-
-            var snapshot = new SnapshotMessage
-            {
-                TargetClientId = request.RequestorClientId,
-                WorldDataPayload = worldBytes
-            };
-
-            var packet = MakePacket(MessageType.Snapshot, snapshot);
-            _transport.SendAsync(Guid.Empty, packet, CancellationToken.None);
         }
 
         public async Task DisconnectAsync(CancellationToken ct = default)
@@ -132,29 +117,12 @@ namespace Assets.Scripts.Network.NetCore
 
             switch (type)
             {
-                case MessageType.SnapshotRequest:
-                    {
-                        var request = _serializer.Deserialize<SnapshotRequestMessage>(payload);
-                        if (request == null)
-                            return;
-
-                        // Ответ на SnapshotRequest можно тоже отложить на главный поток,
-                        // если сериализация/доступ к _worldState должна быть на нем.
-                        _mainThreadActions.Enqueue(() =>
-                        {
-                            HandleSnapshotRequest(request);
-                        });
-
-                        break;
-                    }
-
                 case MessageType.Snapshot:
                     {
                         var snapshot = _serializer.Deserialize<SnapshotMessage>(payload);
                         if (snapshot == null)
                             return;
 
-                        // Считаем, что сервер уже доставил снапшот именно тому клиенту, кому нужно.
                         _mainThreadActions.Enqueue(() =>
                         {
                             ApplySnapshot(snapshot);
@@ -208,7 +176,6 @@ namespace Assets.Scripts.Network.NetCore
         /// </summary>
         private void ApplySnapshot(SnapshotMessage snapshot)
         {
-            // Десериализуем WorldData из byte[]
             var newWorldData = _serializer.Deserialize<WorldData>(snapshot.WorldDataPayload);
             if (newWorldData == null)
             {
@@ -222,10 +189,10 @@ namespace Assets.Scripts.Network.NetCore
                 return;
             }
 
-            // Переносим данные во существующий экземпляр без генерации патчей
             currentWorld.ApplySnapshot(newWorldData);
             Debug.Log("[CLIENT] Snapshot applied.");
         }
+
         /// <summary>
         /// Локальное изменение модели (WorldData/BoxData) → отправка патча на сервер.
         /// </summary>
