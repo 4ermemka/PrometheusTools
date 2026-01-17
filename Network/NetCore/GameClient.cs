@@ -1,6 +1,7 @@
 ﻿using Assets.Shared.ChangeDetector;
 using Assets.Shared.ChangeDetector.Base.Mapping;
 using Assets.Shared.Model;
+using Assets.Shared.Network.NetCore;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -47,9 +48,50 @@ namespace Assets.Scripts.Network.NetCore
             _worldState.Changed += OnLocalWorldChanged;
         }
 
-        public async Task ConnectAsync(string address, int port, CancellationToken ct = default)
+        /// <summary>
+        /// Подключение к серверу.
+        /// После успешного подключения отправляем SnapshotRequest.
+        /// </summary>
+        public async Task ConnectAsync(string address, int port, CancellationToken ct)
         {
             await _transport.StartAsync(address, port, ct);
+            await SendSnapshotRequest();
+        }
+
+        private async Task SendSnapshotRequest()
+        {
+            var request = new SnapshotRequestMessage
+            {
+                // На клиенте мы пока не знаем ничего про RequestorClientId, сервер сам его проставит.
+                RequestorClientId = Guid.Empty
+            };
+
+            var packet = MakePacket(MessageType.SnapshotRequest, request);
+
+            try
+            {
+                // Для серверного транспорта Guid.Empty обычно означает "на сервер".
+                await _transport.SendAsync(Guid.Empty, packet, CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[CLIENT] SendSnapshotRequest failed: {ex}");
+            }
+        }
+
+        private void HandleSnapshotRequest(SnapshotRequestMessage request)
+        {
+            // Сериализуем WorldData в byte[]
+            var worldBytes = _serializer.Serialize(_worldState); // _worldState — WorldData : SyncNode
+
+            var snapshot = new SnapshotMessage
+            {
+                TargetClientId = request.RequestorClientId,
+                WorldDataPayload = worldBytes
+            };
+
+            var packet = MakePacket(MessageType.Snapshot, snapshot);
+            _transport.SendAsync(Guid.Empty, packet, CancellationToken.None);
         }
 
         public async Task DisconnectAsync(CancellationToken ct = default)
@@ -92,10 +134,11 @@ namespace Assets.Scripts.Network.NetCore
             {
                 case MessageType.Snapshot:
                     {
-                        // Десериализуем SnapshotMessage.
                         var snapshot = _serializer.Deserialize<SnapshotMessage>(payload);
+                        if (snapshot == null)
+                            return;
 
-                        // Применить снапшот нужно на главном потоке, поэтому откладываем действие.
+                        // Считаем, что сервер уже доставил снапшот именно тому клиенту, кому нужно.
                         _mainThreadActions.Enqueue(() =>
                         {
                             ApplySnapshot(snapshot);
@@ -106,8 +149,10 @@ namespace Assets.Scripts.Network.NetCore
 
                 case MessageType.Patch:
                     {
-                        // Десериализуем патч и добавляем в очередь для применения в Update.
                         var patch = _serializer.Deserialize<PatchMessage>(payload);
+                        if (patch == null)
+                            return;
+
                         _incomingPatches.Enqueue(patch);
                         break;
                     }
@@ -124,7 +169,7 @@ namespace Assets.Scripts.Network.NetCore
             while (_incomingPatches.TryDequeue(out var patch))
             {
                 var value = SyncValueConverter.FromDtoIfNeeded(patch.NewValue);
-                Debug.Log($"[GameClient] Applying patch: {patch.Path} -> {patch.NewValue}");
+                Debug.Log($"[GameClient] Applying patch: {string.Join(".", patch.Path.Select(p => p.Name))} -> {patch.NewValue}");
                 _worldState.ApplyPatch(patch.Path, value);
             }
 
@@ -143,50 +188,36 @@ namespace Assets.Scripts.Network.NetCore
         }
 
         /// <summary>
-        /// Применение снапшота: полная синхронизация WorldData с серверной версией.
+        /// Применение снапшота: полная синхронизация WorldData с авторитетной версией.
         /// </summary>
         private void ApplySnapshot(SnapshotMessage snapshot)
         {
-            // Считаем, что SnapshotMessage.WorldStatePayload содержит сериализованный WorldData.
-            var newWorldData = _serializer.Deserialize<WorldData>(snapshot.WorldStatePayload);
+            // Десериализуем WorldData из byte[]
+            var newWorldData = _serializer.Deserialize<WorldData>(snapshot.WorldDataPayload);
+            if (newWorldData == null)
+            {
+                Debug.LogWarning("[CLIENT] ApplySnapshot: deserialized WorldData is null.");
+                return;
+            }
 
-            // Простейший способ: заменить содержимое старого WorldData данными из newWorldData.
-            // Важно не менять сам объект _worldState, чтобы не ломать ссылки у ChangeDetector и BoxView.
+            if (_worldState is not WorldData currentWorld)
+            {
+                Debug.LogWarning("[CLIENT] ApplySnapshot: _worldState is not WorldData.");
+                return;
+            }
 
-            //if (_worldState is WorldData worldData)
-            //{
-            //    // Очищаем и копируем список коробок.
-            //    worldData.Box.Position = newWorldData.Position;
-//
-            //    foreach (var box in newWorldData.Boxes)
-            //    {
-            //        // Можно либо копировать объекты, либо класть их как есть.
-            //        // Для простоты: создаём новые, чтобы избежать неожиданных ссылок.
-            //        var copy = new BoxData
-            //        {
-            //            Position = box.Position
-            //            // здесь же копировать остальные поля, если появятся
-            //        };
-            //        worldData.Boxes.Add(copy);
-            //    }
-
-                // После такого обновления ChangeDetector сам поднимет Changed для затронутых полей,
-                // а BoxView в LateUpdate/Update подтянет позиции.
-            //}
-            //else
-            //{
-            //    Debug.LogWarning("[CLIENT] ApplySnapshot: _worldState не является WorldData.");
-            //}
+            // Переносим данные во существующий экземпляр без генерации патчей
+            currentWorld.ApplySnapshot(newWorldData);
+            Debug.Log("[CLIENT] Snapshot applied.");
         }
-
         /// <summary>
         /// Локальное изменение модели (WorldData/BoxData) → отправка патча на сервер.
         /// </summary>
         private async void OnLocalWorldChanged(FieldChange change)
         {
-            Debug.Log($"[CLIENT] OnLocalWorldChanged: path={string.Join(".", change.Path.Select(p => p.Name))} ");
+            Debug.Log($"[CLIENT] OnLocalWorldChanged: path={string.Join(".", change.Path.Select(p => p.Name))}");
+
             if (_serializer == null || _transport == null)
-            
                 return;
 
             var path = new List<FieldPathSegment>(change.Path);
@@ -198,7 +229,7 @@ namespace Assets.Scripts.Network.NetCore
                 NewValue = newValue
             };
 
-            Debug.Log($"[CLIENT] MakePacket patch to send: {patch.Path}: {patch.NewValue}");
+            Debug.Log($"[CLIENT] MakePacket patch to send: {string.Join(".", patch.Path.Select(p => p.Name))}: {patch.NewValue}");
 
             ArraySegment<byte> packet;
             try

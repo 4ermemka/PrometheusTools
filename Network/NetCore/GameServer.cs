@@ -1,6 +1,7 @@
 ﻿using Assets.Scripts.Network.NetTCP;
 using Assets.Shared.ChangeDetector;
 using Assets.Shared.ChangeDetector.Base.Mapping;
+using Assets.Shared.Network.NetCore;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -11,13 +12,20 @@ using UnityEngine;
 namespace Assets.Scripts.Network.NetCore
 {
     /// <summary>
-    /// Авторитетный сервер (хост), принимающий патчи от клиентов и рассылающий их всем.
-    /// Работает только с Snapshot и Patch, без "команд".
+    /// Сервер-роутер: принимает сообщения от клиентов и пересылает их другим.
+    /// Не хранит WorldState, не применяет патчи.
+    /// Работает с Handshake, SnapshotRequest, Snapshot и Patch.
     /// </summary>
     public sealed class GameServer : IDisposable
     {
         private readonly ITransport _transport;
         private readonly IGameSerializer _serializer;
+
+        // Простейшее хранение подключённых клиентов
+        private readonly HashSet<Guid> _clients = new HashSet<Guid>();
+
+        // Первый подключившийся клиент считаем авторитетным источником снапшотов
+        private Guid _hostClientId = Guid.Empty;
 
         public GameServer(ITransport transport, IGameSerializer serializer)
         {
@@ -35,17 +43,33 @@ namespace Assets.Scripts.Network.NetCore
         public Task StopAsync(CancellationToken ct = default)
             => _transport.StopAsync(ct);
 
-        private async void OnClientConnected(Guid clientId)
+        private void OnClientConnected(Guid clientId)
         {
-            // по новой схеме снапшот тоже берётся НЕ из сервера,
-            // а из того клиента, который считается источником истины.
-            // В минимальном варианте можно вообще не слать снапшот отсюда,
-            // а сделать «pull-схему» (новый клиент просит у выбранного хоста).
+            _clients.Add(clientId);
+
+            // Первый подключившийся клиент становится хостом
+            if (_hostClientId == Guid.Empty)
+            {
+                _hostClientId = clientId;
+                Debug.Log($"[SERVER] Host client set to {clientId}");
+            }
+
+            Debug.Log($"[SERVER] Client connected: {clientId}");
         }
 
         private void OnClientDisconnected(Guid clientId)
         {
-            // очистка по желанию
+            _clients.Remove(clientId);
+
+            Debug.Log($"[SERVER] Client disconnected: {clientId}");
+
+            // Если отключился хост, можно либо сбросить _hostClientId,
+            // либо попытаться назначить нового (из оставшихся клиентов).
+            if (_hostClientId == clientId)
+            {
+                _hostClientId = _clients.FirstOrDefault();
+                Debug.Log($"[SERVER] Host client changed to {_hostClientId}");
+            }
         }
 
         private async void OnDataReceived(Guid clientId, ArraySegment<byte> data)
@@ -55,15 +79,50 @@ namespace Assets.Scripts.Network.NetCore
             switch (type)
             {
                 case MessageType.SnapshotRequest:
-                    // по простой схеме сервер вообще не отвечает снапшотом,
-                    // он просто пересылает запрос тому, кто является «источником состояния»
-                    // или вообще не использует SnapshotRequest на этом уровне
-                    break;
+                    {
+                        // Клиент просит снапшот.
+                        // Десериализуем запрос, дописываем в него, кто просит, и шлём хосту.
+                        var request = _serializer.Deserialize<SnapshotRequestMessage>(payload);
+                        if (request == null)
+                            return;
+
+                        // Кто запросил снапшот
+                        request.RequestorClientId = clientId;
+
+                        var forwardedPayload = _serializer.Serialize(request);
+                        var packet = MakePacket(MessageType.SnapshotRequest, forwardedPayload);
+
+                        if (_hostClientId != Guid.Empty && _clients.Contains(_hostClientId))
+                        {
+                            await _transport.SendAsync(_hostClientId, packet, CancellationToken.None);
+                            Debug.Log($"[SERVER] Forwarded SnapshotRequest from {clientId} to host {_hostClientId}");
+                        }
+
+                        break;
+                    }
+
+                case MessageType.Snapshot:
+                    {
+                        // Хост прислал снапшот для конкретного клиента.
+                        var snapshot = _serializer.Deserialize<SnapshotMessage>(payload);
+                        if (snapshot == null)
+                            return;
+
+                        var targetId = snapshot.TargetClientId;
+
+                        if (targetId != Guid.Empty && _clients.Contains(targetId))
+                        {
+                            var packet = MakePacket(MessageType.Snapshot, payload);
+                            await _transport.SendAsync(targetId, packet, CancellationToken.None);
+                            Debug.Log($"[SERVER] Forwarded Snapshot from {clientId} to {targetId}");
+                        }
+
+                        break;
+                    }
 
                 case MessageType.Patch:
                     {
-                        // сервер НЕ десериализует и НЕ применяет патч,
-                        // он просто роутит его всем, кроме отправителя
+                        // Патчи сервером не применяются, только рассылаются всем, кроме отправителя.
                         var packet = new ArraySegment<byte>(data.Array, data.Offset, data.Count);
 
                         if (_transport is TcpHostTransport hostTransport)
@@ -73,11 +132,16 @@ namespace Assets.Scripts.Network.NetCore
 
                         break;
                     }
+
+                case MessageType.Handshake:
+                    {
+                        // При необходимости можно что-то сделать с Handshake,
+                        // пока просто игнорируем или логируем.
+                        Debug.Log($"[SERVER] Handshake from {clientId}");
+                        break;
+                    }
             }
         }
-
-        // MakePacket/ParsePacket можешь вынести в общий helper; серверу они почти не нужны,
-        // он уже получает готовый packet [type][len][payload].
 
         public void Dispose()
         {
@@ -103,7 +167,21 @@ namespace Assets.Scripts.Network.NetCore
 
             return Tuple.Create(type, payload);
         }
+
+        private ArraySegment<byte> MakePacket(MessageType type, byte[] payload)
+        {
+            var result = new byte[1 + 4 + payload.Length];
+            result[0] = (byte)type;
+
+            var len = payload.Length;
+            result[1] = (byte)(len & 0xFF);
+            result[2] = (byte)((len >> 8) & 0xFF);
+            result[3] = (byte)((len >> 16) & 0xFF);
+            result[4] = (byte)((len >> 24) & 0xFF);
+
+            Buffer.BlockCopy(payload, 0, result, 5, payload.Length);
+
+            return new ArraySegment<byte>(result);
+        }
     }
-
-
 }
