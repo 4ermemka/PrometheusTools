@@ -2,7 +2,7 @@
 using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
-using UnityEngine;
+using Assets.Shared.ChangeDetector.Collections;
 
 namespace Assets.Shared.ChangeDetector
 {
@@ -23,11 +23,16 @@ namespace Assets.Shared.ChangeDetector
         /// </summary>
         public void ApplyPatch(IReadOnlyList<FieldPathSegment> path, object? newValue)
         {
+            if (path == null || path.Count == 0)
+                throw new ArgumentException("Path must be non-empty.", nameof(path));
+
             ApplyPatchInternal(path, 0, newValue);
         }
 
         /// <summary>
-        /// Рекурсивное применение снапшота: копирует значения из source в target.
+        /// Применяет полный снапшот: копирует все данные из другого SyncNode
+        /// в текущий экземпляр, рекурсивно по всем полям/свойствам.
+        /// Не поднимает Changed и не генерирует патчи, только Patched на изменённых узлах.
         /// </summary>
         public void ApplySnapshot(SyncNode source)
         {
@@ -40,10 +45,15 @@ namespace Assets.Shared.ChangeDetector
 
             var path = new List<FieldPathSegment>();
 
-            // ВАЖНО: root = this (WorldData), и именно на нём всегда вызывается ApplyPatch.
+            // root = this (обычно WorldData), именно на нём всегда вызываем ApplyPatch.
             ApplySnapshotRecursive(root: this, target: this, source: source, path);
         }
 
+        /// <summary>
+        /// Рекурсивное применение снапшота: обходим дерево source/target
+        /// и для каждого "листа" вызываем root.ApplyPatch с полным путём.
+        /// Для коллекций сейчас делаем простую замену содержимого.
+        /// </summary>
         private static void ApplySnapshotRecursive(
             SyncNode root,
             SyncNode target,
@@ -85,12 +95,23 @@ namespace Assets.Shared.ChangeDetector
 
                 path.Add(new FieldPathSegment(member.Name));
 
-                if (typeof(SyncNode).IsAssignableFrom(memberType) &&
-                    valueSource is SyncNode childSource &&
-                    valueTarget is SyncNode childTarget)
+                // 1) Коллекции: пока делаем полную замену содержимого
+                if (typeof(ITrackableCollection).IsAssignableFrom(memberType) &&
+                    valueSource is IList sourceList &&
+                    valueTarget is IList targetList)
+                {
+                    targetList.Clear();
+                    for (int i = 0; i < sourceList.Count; i++)
+                        targetList.Add(sourceList[i]);
+                }
+                // 2) Вложенный SyncNode
+                else if (typeof(SyncNode).IsAssignableFrom(memberType) &&
+                         valueSource is SyncNode childSource &&
+                         valueTarget is SyncNode childTarget)
                 {
                     ApplySnapshotRecursive(root, childTarget, childSource, path);
                 }
+                // 3) Обычный лист
                 else
                 {
                     var fullPath = new List<FieldPathSegment>(path);
@@ -100,8 +121,6 @@ namespace Assets.Shared.ChangeDetector
                 path.RemoveAt(path.Count - 1);
             }
         }
-
-
 
         /// <summary>
         /// Рекурсивное применение патча по пути.
@@ -113,24 +132,31 @@ namespace Assets.Shared.ChangeDetector
             var type = GetType();
             var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
-            // 1. Если текущий объект – коллекция и сегмент – индекс, обрабатываем как элемент списка
+            // 1. Если текущий объект — список, и сегмент — индекс, обрабатываем как элемент списка
             if (this is IList list && TryParseIndex(segmentName, out var elementIndex))
             {
-                bool isLast = index == path.Count - 1;
+                bool isLeaf = index == path.Count - 1;
 
-                if (isLast)
+                if (elementIndex < 0 || elementIndex >= list.Count)
+                    throw new IndexOutOfRangeException(
+                        $"Index {elementIndex} is out of range for list on '{type.Name}'.");
+
+                if (isLeaf)
                 {
-                    // Лист: заменяем элемент целиком (для патчей Replace по элементу)
-                    var converted = ConvertIfNeeded(newValue, typeof(object));
+                    // Лист: заменяем элемент целиком
+                    var elementType = list.GetType().IsGenericType
+                        ? list.GetType().GetGenericArguments()[0]
+                        : typeof(object);
+
+                    var converted = ConvertIfNeeded(newValue, elementType);
                     list[elementIndex] = converted;
                     Patched?.Invoke();
                     return;
                 }
                 else
                 {
-                    // Спускаемся в элемент списка, если он SyncNode
+                    // Спускаемся в элемент по индексу
                     var item = list[elementIndex];
-
                     if (item is SyncNode childSync)
                     {
                         childSync.ApplyPatchInternal(path, index + 1, newValue);
@@ -142,7 +168,7 @@ namespace Assets.Shared.ChangeDetector
                 }
             }
 
-            // 2. Обычный случай: работаем с полями/свойствами
+            // 2. Обычный путь по полям/свойствам (НЕ для индексов)
             FieldInfo? backingField = null;
             if (!string.IsNullOrEmpty(segmentName))
             {
@@ -166,9 +192,9 @@ namespace Assets.Shared.ChangeDetector
                              $"Member '{segmentName}' not found on '{type.Name}'.");
             }
 
-            bool isLeaf = index == path.Count - 1;
+            bool isLast = index == path.Count - 1;
 
-            if (isLeaf)
+            if (isLast)
             {
                 SetMemberValue(member, newValue);
                 Patched?.Invoke();
@@ -177,16 +203,89 @@ namespace Assets.Shared.ChangeDetector
             {
                 var childValue = GetMemberValue(member, this);
 
-                if (childValue is SyncNode childSync)
+                // Коллекции, которые объявлены как поля/свойства (SyncList и т.п.)
+                if (childValue is ITrackableCollection trackableCollection)
+                {
+                    ApplyPatchIntoCollection(trackableCollection, path, index + 1, newValue);
+                }
+                else if (childValue is SyncNode childSync)
                 {
                     childSync.ApplyPatchInternal(path, index + 1, newValue);
                 }
                 else
                 {
                     throw new InvalidOperationException(
-                        $"Member '{segmentName}' on '{type.Name}' is not SyncNode; cannot continue path.");
+                        $"Member '{segmentName}' on '{type.Name}' is not SyncNode or ITrackableCollection; cannot continue path.");
                 }
             }
+        }
+
+        /// <summary>
+        /// Применение патча внутрь коллекции: следующий сегмент трактуется как индекс.
+        /// </summary>
+        private void ApplyPatchIntoCollection(
+            ITrackableCollection collection,
+            IReadOnlyList<FieldPathSegment> path,
+            int index,
+            object? newValue)
+        {
+            if (collection is not IList list)
+                throw new InvalidOperationException($"Collection '{collection.GetType().Name}' is not IList.");
+
+            if (index >= path.Count)
+                throw new InvalidOperationException("Path ended before collection index.");
+
+            var segmentName = path[index].Name;
+
+            if (!TryParseIndex(segmentName, out var elementIndex))
+                throw new InvalidOperationException(
+                    $"Expected collection index, got '{segmentName}' in path.");
+
+            if (elementIndex < 0 || elementIndex >= list.Count)
+                throw new IndexOutOfRangeException(
+                    $"Index {elementIndex} is out of range for collection '{collection.GetType().Name}'.");
+
+            bool isLeaf = index == path.Count - 1;
+
+            if (isLeaf)
+            {
+                // Изменение самого элемента коллекции (Replace)
+                var elementType = list.GetType().IsGenericType
+                    ? list.GetType().GetGenericArguments()[0]
+                    : typeof(object);
+
+                var converted = ConvertIfNeeded(newValue, elementType);
+                list[elementIndex] = converted;
+                (collection as SyncNode)?.Patched?.Invoke();
+            }
+            else
+            {
+                // Изменение внутри элемента: Boxes[3].Position
+                var item = list[elementIndex];
+
+                if (item is SyncNode childSync)
+                {
+                    childSync.ApplyPatchInternal(path, index + 1, newValue);
+                }
+                else
+                {
+                    throw new InvalidOperationException(
+                        $"Element at index {elementIndex} of '{collection.GetType().Name}' is not SyncNode.");
+                }
+            }
+        }
+
+        private static bool TryParseIndex(string segmentName, out int index)
+        {
+            // Форматы: "[3]" или "3"
+            if (!string.IsNullOrEmpty(segmentName) &&
+                segmentName[0] == '[' &&
+                segmentName[^1] == ']')
+            {
+                segmentName = segmentName.Substring(1, segmentName.Length - 2);
+            }
+
+            return int.TryParse(segmentName, out index);
         }
 
         private void SetMemberValue(MemberInfo member, object? newValue)
@@ -203,6 +302,10 @@ namespace Assets.Shared.ChangeDetector
             {
                 // Сюда должны попадать только "несетевые" свойства,
                 // которые НЕ используют SetProperty и не помечены [Sync].
+                var setter = pi.GetSetMethod(true);
+                if (setter == null)
+                    return;
+
                 var converted = ConvertIfNeeded(newValue, pi.PropertyType);
                 pi.SetValue(this, converted);
                 return;
@@ -225,16 +328,14 @@ namespace Assets.Shared.ChangeDetector
             {
                 case PropertyInfo pi:
                     {
-                        // Защита от "нестандартных" геттеров, которые ломают CreateDelegate внутри GetValue
                         var getter = pi.GetGetMethod(true);
                         if (getter == null)
                             return null;
 
-                        // Индексаторы и прочие с параметрами — не трогаем
+                        // Индексаторы и свойства с параметрами уже отфильтрованы, но на всякий случай
                         if (getter.GetParameters().Length > 0)
                             return null;
 
-                        // Если тип declaring/target не совпадает, тоже лучше пропустить
                         if (getter.IsStatic)
                             return getter.Invoke(null, Array.Empty<object>());
 
@@ -247,15 +348,6 @@ namespace Assets.Shared.ChangeDetector
                 default:
                     throw new NotSupportedException($"Unsupported member type: {member.MemberType}");
             }
-        }
-
-        private static bool TryParseIndex(string segmentName, out int index)
-        {
-            // ожидаем формат "[3]" или "3"
-            if (segmentName.Length > 2 && segmentName[0] == '[' && segmentName[^1] == ']')
-                segmentName = segmentName.Substring(1, segmentName.Length - 2);
-
-            return int.TryParse(segmentName, out index);
         }
 
         private object? ConvertIfNeeded(object? value, Type targetType)
