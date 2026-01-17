@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using UnityEngine;
@@ -44,8 +45,8 @@ namespace Assets.Shared.ChangeDetector
         }
 
         private static void ApplySnapshotRecursive(
-            SyncNode root,   // всегда корневой WorldData, именно на нём вызываем ApplyPatch
-            SyncNode target, // текущий узел, по которому бежим рекурсией
+            SyncNode root,
+            SyncNode target,
             SyncNode source,
             List<FieldPathSegment> path)
         {
@@ -57,43 +58,50 @@ namespace Assets.Shared.ChangeDetector
                 if (member is not FieldInfo && member is not PropertyInfo)
                     continue;
 
-                // пропускаем backing-fields
-                if (member.Name.StartsWith("_"))
+                // Пропускаем backing-fields (_xxx)
+                if (member.Name.StartsWith("_", StringComparison.Ordinal))
                     continue;
+
+                if (member is PropertyInfo pi)
+                {
+                    var getter = pi.GetGetMethod(true);
+                    if (getter == null)
+                        continue;
+
+                    // Пропускаем индексаторы и свойства с параметрами
+                    if (getter.GetParameters().Length > 0)
+                        continue;
+
+                    // Пропускаем свойства только с getter (Count, IsReadOnly и т.п.)
+                    var setter = pi.GetSetMethod(true);
+                    if (setter == null)
+                        continue;
+                }
 
                 var memberType = GetMemberType(member);
 
                 var valueSource = GetMemberValue(member, source);
                 var valueTarget = GetMemberValue(member, target);
 
-                if (valueSource == null && typeof(SyncNode).IsAssignableFrom(memberType))
-                {
-                    Debug.LogWarning($"[SyncNode] GetMemberValue returned null for {type.Name}.{member.Name}");
-                }
-
-                // добавляем сегмент имени члена
                 path.Add(new FieldPathSegment(member.Name));
 
                 if (typeof(SyncNode).IsAssignableFrom(memberType) &&
                     valueSource is SyncNode childSource &&
                     valueTarget is SyncNode childTarget)
                 {
-                    // Вложенный SyncNode: рекурсивно внутрь,
-                    // root остаётся тем же (WorldData), target/source идут вниз.
                     ApplySnapshotRecursive(root, childTarget, childSource, path);
                 }
                 else
                 {
-                    // Лист: вызываем ApplyPatch на КОРНЕ с ПОЛНЫМ путём.
                     var fullPath = new List<FieldPathSegment>(path);
                     root.ApplyPatch(fullPath, valueSource);
-
                 }
 
-                // убираем последний сегмент перед переходом к следующему члену
                 path.RemoveAt(path.Count - 1);
             }
         }
+
+
 
         /// <summary>
         /// Рекурсивное применение патча по пути.
@@ -105,7 +113,36 @@ namespace Assets.Shared.ChangeDetector
             var type = GetType();
             var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
-            // 1. Сначала пробуем backing-field: _boxData, _position и т.п.
+            // 1. Если текущий объект – коллекция и сегмент – индекс, обрабатываем как элемент списка
+            if (this is IList list && TryParseIndex(segmentName, out var elementIndex))
+            {
+                bool isLast = index == path.Count - 1;
+
+                if (isLast)
+                {
+                    // Лист: заменяем элемент целиком (для патчей Replace по элементу)
+                    var converted = ConvertIfNeeded(newValue, typeof(object));
+                    list[elementIndex] = converted;
+                    Patched?.Invoke();
+                    return;
+                }
+                else
+                {
+                    // Спускаемся в элемент списка, если он SyncNode
+                    var item = list[elementIndex];
+
+                    if (item is SyncNode childSync)
+                    {
+                        childSync.ApplyPatchInternal(path, index + 1, newValue);
+                        return;
+                    }
+
+                    throw new InvalidOperationException(
+                        $"List element at index {elementIndex} on '{type.Name}' is not SyncNode; cannot continue path.");
+                }
+            }
+
+            // 2. Обычный случай: работаем с полями/свойствами
             FieldInfo? backingField = null;
             if (!string.IsNullOrEmpty(segmentName))
             {
@@ -119,20 +156,19 @@ namespace Assets.Shared.ChangeDetector
 
             if (backingField != null)
             {
-                member = backingField; // гарантированно FieldInfo → SetMemberValue не тронет SetProperty
+                member = backingField;
             }
             else
             {
-                // 2. Если backing-field нет, работаем как раньше (для несинхронных членов)
                 member = (MemberInfo?)type.GetField(segmentName, flags)
                          ?? type.GetProperty(segmentName, flags)
                          ?? throw new InvalidOperationException(
                              $"Member '{segmentName}' not found on '{type.Name}'.");
             }
 
-            bool isLast = index == path.Count - 1;
+            bool isLeaf = index == path.Count - 1;
 
-            if (isLast)
+            if (isLeaf)
             {
                 SetMemberValue(member, newValue);
                 Patched?.Invoke();
@@ -152,7 +188,6 @@ namespace Assets.Shared.ChangeDetector
                 }
             }
         }
-
 
         private void SetMemberValue(MemberInfo member, object? newValue)
         {
@@ -214,6 +249,14 @@ namespace Assets.Shared.ChangeDetector
             }
         }
 
+        private static bool TryParseIndex(string segmentName, out int index)
+        {
+            // ожидаем формат "[3]" или "3"
+            if (segmentName.Length > 2 && segmentName[0] == '[' && segmentName[^1] == ']')
+                segmentName = segmentName.Substring(1, segmentName.Length - 2);
+
+            return int.TryParse(segmentName, out index);
+        }
 
         private object? ConvertIfNeeded(object? value, Type targetType)
         {

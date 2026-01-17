@@ -223,6 +223,7 @@ namespace Assets.Scripts.Network.NetCore
             Debug.Log("[CLIENT] Snapshot applied.");
         }
 
+
         /// <summary>
         /// Локальное изменение модели (WorldData/BoxData) → отправка патча на сервер.
         /// </summary>
