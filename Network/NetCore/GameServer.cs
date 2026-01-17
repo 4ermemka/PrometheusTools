@@ -85,41 +85,30 @@ namespace Assets.Scripts.Network.NetCore
             {
                 case MessageType.SnapshotRequest:
                     {
-                        // Клиент просит снапшот.
-                        // Десериализуем запрос, дописываем в него, кто просит, и шлём хосту.
                         var request = _serializer.Deserialize<SnapshotRequestMessage>(payload);
-                        if (request == null)
-                            return;
+                        if (request == null) return;
 
-                        // Кто запросил снапшот
                         request.RequestorClientId = clientId;
 
-                        var forwardedPayload = _serializer.Serialize(request);
-                        var packet = MakePacket(MessageType.SnapshotRequest, forwardedPayload);
+                        var fwdPayload = _serializer.Serialize(request);
+                        var packet = MakePacket(MessageType.SnapshotRequest, fwdPayload);
 
                         if (_hostClientId != Guid.Empty && _clients.Contains(_hostClientId))
-                        {
                             await _transport.SendAsync(_hostClientId, packet, CancellationToken.None);
-                            Debug.Log($"[SERVER] Forwarded SnapshotRequest from {clientId} to host {_hostClientId}");
-                        }
 
                         break;
                     }
 
                 case MessageType.Snapshot:
                     {
-                        // Хост прислал снапшот для конкретного клиента.
                         var snapshot = _serializer.Deserialize<SnapshotMessage>(payload);
-                        if (snapshot == null)
-                            return;
+                        if (snapshot == null) return;
 
                         var targetId = snapshot.TargetClientId;
-
                         if (targetId != Guid.Empty && _clients.Contains(targetId))
                         {
                             var packet = MakePacket(MessageType.Snapshot, payload);
                             await _transport.SendAsync(targetId, packet, CancellationToken.None);
-                            Debug.Log($"[SERVER] Forwarded Snapshot from {clientId} to {targetId}");
                         }
 
                         break;

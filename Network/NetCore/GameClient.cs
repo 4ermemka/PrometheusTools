@@ -117,31 +117,62 @@ namespace Assets.Scripts.Network.NetCore
 
             switch (type)
             {
+                case MessageType.SnapshotRequest:
+                    {
+                        var request = _serializer.Deserialize<SnapshotRequestMessage>(payload);
+                        if (request == null) return;
+
+                        // Важно: этот case должен быть активен только на хост-клиенте.
+                        _mainThreadActions.Enqueue(() => HandleSnapshotRequest(request));
+                        break;
+                    }
+
                 case MessageType.Snapshot:
                     {
                         var snapshot = _serializer.Deserialize<SnapshotMessage>(payload);
-                        if (snapshot == null)
-                            return;
+                        if (snapshot == null) return;
 
-                        _mainThreadActions.Enqueue(() =>
-                        {
-                            ApplySnapshot(snapshot);
-                        });
-
+                        _mainThreadActions.Enqueue(() => ApplySnapshot(snapshot));
                         break;
                     }
 
                 case MessageType.Patch:
                     {
                         var patch = _serializer.Deserialize<PatchMessage>(payload);
-                        if (patch == null)
-                            return;
+                        if (patch == null) return;
 
                         _incomingPatches.Enqueue(patch);
                         break;
                     }
             }
         }
+
+        private async void HandleSnapshotRequest(SnapshotRequestMessage request)
+        {
+            try
+            {
+                // request.RequestorClientId – тот, кому сервер потом перешлёт Snapshot.
+                var worldBytes = _serializer.Serialize(_worldState); // _worldState : WorldData : SyncNode
+
+                var snapshot = new SnapshotMessage
+                {
+                    TargetClientId = request.RequestorClientId,
+                    WorldDataPayload = worldBytes
+                };
+
+                var packet = MakePacket(MessageType.Snapshot, snapshot);
+
+                // Отправляем снапшот на сервер, он по TargetClientId доставит его нужному клиенту.
+                await _transport.SendAsync(Guid.Empty, packet, CancellationToken.None);
+
+                Debug.Log($"[CLIENT-HOST] Snapshot sent to {request.RequestorClientId}");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[CLIENT-HOST] HandleSnapshotRequest failed: {ex}");
+            }
+        }
+
 
         /// <summary>
         /// Вызывается из MonoBehaviour.Update на главном потоке.
