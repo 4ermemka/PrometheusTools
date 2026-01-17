@@ -4,46 +4,45 @@ using System.Reflection;
 
 namespace Assets.Shared.ChangeDetector
 {
-    /// <summary>
-    /// Узел, который умеет применять входящие патчи по пути.
-    /// Не поднимает Changed, только своё событие Patched.
-    /// </summary>
     public abstract class SyncNode : TrackableNode
     {
-        /// <summary>
-        /// Срабатывает, когда к узлу был применён патч (или снапшот).
-        /// Не предназначено для отправки исходящих патчей.
-        /// </summary>
         public event Action? Patched;
 
-        /// <summary>
-        /// Применяет патч по пути без генерации Changed.
-        /// </summary>
         public void ApplyPatch(IReadOnlyList<FieldPathSegment> path, object? newValue)
         {
             ApplyPatchInternal(path, 0, newValue);
             Patched?.Invoke();
         }
 
-        /// <summary>
-        /// Технический рекурсивный проход по пути.
-        /// </summary>
         private void ApplyPatchInternal(IReadOnlyList<FieldPathSegment> path, int index, object? newValue)
         {
             var segmentName = path[index].Name;
             var type = GetType();
             var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
-            var member = (MemberInfo?)type.GetProperty(segmentName, flags)
-                         ?? type.GetField(segmentName, flags);
+            // 1. Пытаемся сначала найти backing‑field: _<ИмяСвойства>
+            var backingField = type.GetField($"_{segmentName}", flags);
 
-            if (member == null)
-                throw new InvalidOperationException($"Member '{segmentName}' not found on '{type.Name}'.");
+            MemberInfo member;
+
+            if (backingField != null)
+            {
+                member = backingField;
+            }
+            else
+            {
+                // 2. Если backing‑field нет — ищем обычное свойство/поле
+                member = (MemberInfo?)type.GetProperty(segmentName, flags)
+                         ?? type.GetField(segmentName, flags)
+                         ?? throw new InvalidOperationException(
+                             $"Member '{segmentName}' not found on '{type.Name}'.");
+            }
 
             bool isLast = index == path.Count - 1;
 
             if (isLast)
             {
+                // Лист: просто пишем значение (обычно в backing‑field), без SetProperty
                 SetMemberValue(member, newValue);
             }
             else

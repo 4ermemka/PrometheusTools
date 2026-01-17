@@ -135,6 +135,7 @@ namespace Assets.Shared.ChangeDetector
         protected bool SetProperty<T>(
             ref T field,
             T value,
+            bool applyPatch = false,
             [CallerMemberName] string propertyName = ""
         )
         {
@@ -144,7 +145,9 @@ namespace Assets.Shared.ChangeDetector
             var oldValue = field;
             field = value;
 
-            if (_syncMap.TryGetValue(propertyName, out var isSync) && isSync)
+            // Патч формируем только для локальных изменений
+            if (!applyPatch &&
+                _syncMap.TryGetValue(propertyName, out var isSync) && isSync)
             {
                 var path = new List<FieldPathSegment> { new FieldPathSegment(propertyName) };
                 RaiseChange(new FieldChange(path, oldValue, value));
@@ -157,6 +160,7 @@ namespace Assets.Shared.ChangeDetector
 
             return true;
         }
+
 
         /// <summary>
         /// Поднимает локальное изменение (без рекурсии по детям).
