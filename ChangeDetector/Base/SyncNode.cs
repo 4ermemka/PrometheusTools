@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using Assets.Shared.ChangeDetector.Collections;
@@ -52,7 +51,7 @@ namespace Assets.Shared.ChangeDetector
         /// <summary>
         /// Рекурсивное применение снапшота: обходим дерево source/target
         /// и для каждого "листа" вызываем root.ApplyPatch с полным путём.
-        /// Для коллекций сейчас делаем простую замену содержимого.
+        /// Для коллекций делегируем применение снапшота самим коллекциям.
         /// </summary>
         private static void ApplySnapshotRecursive(
             SyncNode root,
@@ -95,14 +94,12 @@ namespace Assets.Shared.ChangeDetector
 
                 path.Add(new FieldPathSegment(member.Name));
 
-                // 1) Коллекции: пока делаем полную замену содержимого
-                if (typeof(ITrackableCollection).IsAssignableFrom(memberType) &&
-                    valueSource is IList sourceList &&
-                    valueTarget is IList targetList)
+                // 1) Коллекции, поддерживающие снапшот
+                if (typeof(ISnapshotCollection).IsAssignableFrom(memberType) &&
+                    valueTarget is ISnapshotCollection targetCollection)
                 {
-                    targetList.Clear();
-                    for (int i = 0; i < sourceList.Count; i++)
-                        targetList.Add(sourceList[i]);
+                    // valueSource – то, что сериализатор вернул для этой коллекции (обычно такой же тип)
+                    targetCollection.ApplySnapshotFrom(valueSource);
                 }
                 // 2) Вложенный SyncNode
                 else if (typeof(SyncNode).IsAssignableFrom(memberType) &&
@@ -132,19 +129,20 @@ namespace Assets.Shared.ChangeDetector
             var type = GetType();
             var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
-            // 1. Попытка коллекционного шага, если текущий узел сам коллекция
-            if (this is ISyncIndexableCollection selfCollection && index < path.Count - 1)
+            // Если текущий объект сам коллекция и дальше есть элементы пути — передаём в неё.
+            if (this is ISyncIndexableCollection selfCollection && index < path.Count)
             {
                 ApplyPatchIntoCollection(selfCollection, path, index, newValue);
                 return;
             }
 
-            // 2. Обычный путь по полям/свойствам
+            // 1. Обычный путь по полям/свойствам
             FieldInfo? backingField = null;
             if (!string.IsNullOrEmpty(segmentName))
             {
                 var backingFieldName =
                     "_" + char.ToLowerInvariant(segmentName[0]) + segmentName.Substring(1);
+
                 backingField = type.GetField(backingFieldName, flags);
             }
 
@@ -175,6 +173,7 @@ namespace Assets.Shared.ChangeDetector
 
                 if (childValue is ISyncIndexableCollection collection)
                 {
+                    // Член – коллекция: следующий сегмент трактуем как "ключ/индекс" коллекции
                     ApplyPatchIntoCollection(collection, path, index + 1, newValue);
                 }
                 else if (childValue is SyncNode childSync)
@@ -190,47 +189,30 @@ namespace Assets.Shared.ChangeDetector
         }
 
         /// <summary>
-        /// Применение патча внутрь коллекции: следующий сегмент трактуется как индекс.
+        /// Применение патча внутрь коллекции: текущий сегмент (или следующий) трактуется как "индекс/ключ".
         /// </summary>
         private void ApplyPatchIntoCollection(
-            ITrackableCollection collection,
+            ISyncIndexableCollection collection,
             IReadOnlyList<FieldPathSegment> path,
             int index,
             object? newValue)
         {
-            if (collection is not IList list)
-                throw new InvalidOperationException($"Collection '{collection.GetType().Name}' is not IList.");
-
             if (index >= path.Count)
-                throw new InvalidOperationException("Path ended before collection index.");
+                throw new InvalidOperationException("Path ended before collection element.");
 
             var segmentName = path[index].Name;
-
-            if (!TryParseIndex(segmentName, out var elementIndex))
-                throw new InvalidOperationException(
-                    $"Expected collection index, got '{segmentName}' in path.");
-
-            if (elementIndex < 0 || elementIndex >= list.Count)
-                throw new IndexOutOfRangeException(
-                    $"Index {elementIndex} is out of range for collection '{collection.GetType().Name}'.");
-
             bool isLeaf = index == path.Count - 1;
 
             if (isLeaf)
             {
                 // Изменение самого элемента коллекции (Replace)
-                var elementType = list.GetType().IsGenericType
-                    ? list.GetType().GetGenericArguments()[0]
-                    : typeof(object);
-
-                var converted = ConvertIfNeeded(newValue, elementType);
-                list[elementIndex] = converted;
+                collection.SetElement(segmentName, newValue);
                 (collection as SyncNode)?.Patched?.Invoke();
             }
             else
             {
-                // Изменение внутри элемента: Boxes[3].Position
-                var item = list[elementIndex];
+                // Изменение внутри элемента: Boxes[3].Position / Dictionary["key"].Field
+                var item = collection.GetElement(segmentName);
 
                 if (item is SyncNode childSync)
                 {
@@ -239,22 +221,9 @@ namespace Assets.Shared.ChangeDetector
                 else
                 {
                     throw new InvalidOperationException(
-                        $"Element at index {elementIndex} of '{collection.GetType().Name}' is not SyncNode.");
+                        $"Element '{segmentName}' of '{collection.GetType().Name}' is not SyncNode.");
                 }
             }
-        }
-
-        private static bool TryParseIndex(string segmentName, out int index)
-        {
-            // Форматы: "[3]" или "3"
-            if (!string.IsNullOrEmpty(segmentName) &&
-                segmentName[0] == '[' &&
-                segmentName[^1] == ']')
-            {
-                segmentName = segmentName.Substring(1, segmentName.Length - 2);
-            }
-
-            return int.TryParse(segmentName, out index);
         }
 
         private void SetMemberValue(MemberInfo member, object? newValue)
@@ -319,7 +288,7 @@ namespace Assets.Shared.ChangeDetector
             }
         }
 
-        private object? ConvertIfNeeded(object? value, Type targetType)
+        protected object? ConvertIfNeeded(object? value, Type targetType)
         {
             if (value == null)
                 return targetType.IsValueType ? Activator.CreateInstance(targetType) : null;

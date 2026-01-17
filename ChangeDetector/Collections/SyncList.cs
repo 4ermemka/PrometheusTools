@@ -5,11 +5,12 @@ using System.Collections.Generic;
 namespace Assets.Shared.ChangeDetector.Collections
 {
     /// <summary>
-    /// Список с поддержкой трекинга и применения патчей.
+    /// Список с поддержкой трекинга, патчей и снапшотов.
     /// </summary>
     public sealed class SyncList<TItem> : SyncNode,
         IList<TItem>,
         ITrackableCollection,
+        ISnapshotCollection,
         ISyncIndexableCollection
     {
         private readonly List<TItem> _inner = new();
@@ -36,6 +37,10 @@ namespace Assets.Shared.ChangeDetector.Collections
             }
         }
 
+        // ISyncIndexableCollection
+
+        int ISyncIndexableCollection.Count => _inner.Count;
+
         object? ISyncIndexableCollection.GetElement(string segmentName)
         {
             if (!TryParseIndex(segmentName, out var index))
@@ -54,7 +59,27 @@ namespace Assets.Shared.ChangeDetector.Collections
             _inner[index] = converted!;
         }
 
-        int ISyncIndexableCollection.Count => _inner.Count;
+        // ISnapshotCollection
+
+        void ISnapshotCollection.ApplySnapshotFrom(object? sourceCollection)
+        {
+            if (sourceCollection is not IEnumerable sourceEnumerable)
+                throw new InvalidOperationException(
+                    $"Source for SyncList<{typeof(TItem).Name}> snapshot is not enumerable.");
+
+            foreach (var it in _inner)
+                UnwireChild(it);
+
+            _inner.Clear();
+            _childHandlers.Clear();
+
+            foreach (var obj in sourceEnumerable)
+            {
+                var item = (TItem?)ConvertIfNeeded(obj, typeof(TItem));
+                _inner.Add(item!);
+                WireChild(item!);
+            }
+        }
 
         public int Count => _inner.Count;
         public bool IsReadOnly => false;
@@ -260,7 +285,7 @@ namespace Assets.Shared.ChangeDetector.Collections
             return Convert.ChangeType(value, targetType);
         }
 
-        // Явные реализации IList<T> (требуются, если где-то нужны именно интерфейсы)
+        // Явная реализация IList<T> для совместимости
         TItem IList<TItem>.this[int index]
         {
             get => this[index];

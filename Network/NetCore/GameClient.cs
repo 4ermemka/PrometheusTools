@@ -3,6 +3,7 @@ using Assets.Shared.ChangeDetector.Base.Mapping;
 using Assets.Shared.Model;
 using Assets.Shared.Network.NetCore;
 using Assets.Shared.Network.NetCore.Messages;
+using Newtonsoft.Json;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -219,6 +220,7 @@ namespace Assets.Scripts.Network.NetCore
                 return;
             }
 
+            //Debug.Log($"[CLIENT] ApplySnapshot: {JsonConvert.SerializeObject(newWorldData)}.");
             currentWorld.ApplySnapshot(newWorldData);
             Debug.Log("[CLIENT] Snapshot applied.");
         }
