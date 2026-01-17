@@ -64,8 +64,7 @@ namespace Assets.Shared.ChangeDetector.Collections
         void ISnapshotCollection.ApplySnapshotFrom(object? sourceCollection)
         {
             if (sourceCollection is not IEnumerable sourceEnumerable)
-                throw new InvalidOperationException(
-                    $"Source for SyncList<{typeof(TItem).Name}> snapshot is not enumerable.");
+                throw new InvalidOperationException();
 
             foreach (var it in _inner)
                 UnwireChild(it);
@@ -79,7 +78,11 @@ namespace Assets.Shared.ChangeDetector.Collections
                 _inner.Add(item!);
                 WireChild(item!);
             }
+
+            // вся коллекция приведена к снапшоту – уведомляем
+            SnapshotApplied?.Invoke();
         }
+
 
         public int Count => _inner.Count;
         public bool IsReadOnly => false;

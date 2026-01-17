@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Reflection;
 using Assets.Shared.ChangeDetector.Collections;
+using UnityEngine;
 
 namespace Assets.Shared.ChangeDetector
 {
@@ -12,10 +13,15 @@ namespace Assets.Shared.ChangeDetector
     public abstract class SyncNode : TrackableNode
     {
         /// <summary>
-        /// Срабатывает, когда к узлу был применён патч или снапшот.
-        /// Не предназначено для отправки исходящих патчей.
+        /// Срабатывает при применении входящего патча (точечное изменение).
         /// </summary>
-        public event Action? Patched;
+        public Action? Patched;
+
+        /// <summary>
+        /// Срабатывает один раз после применения полного снапшота к этому узлу.
+        /// Используется для переподписки на заменённые объекты.
+        /// </summary>
+        public Action? SnapshotApplied;
 
         /// <summary>
         /// Применяет патч по пути без генерации Changed.
@@ -46,6 +52,8 @@ namespace Assets.Shared.ChangeDetector
 
             // root = this (обычно WorldData), именно на нём всегда вызываем ApplyPatch.
             ApplySnapshotRecursive(root: this, target: this, source: source, path);
+            // после полного прохода по дереву
+            SnapshotApplied?.Invoke();
         }
 
         /// <summary>
@@ -104,6 +112,7 @@ namespace Assets.Shared.ChangeDetector
                          valueTarget is SyncNode childTarget)
                 {
                     ApplySnapshotRecursive(root, childTarget, childSource, path);
+
                 }
                 else
                 {
@@ -204,7 +213,10 @@ namespace Assets.Shared.ChangeDetector
             {
                 // Изменение самого элемента коллекции (Replace)
                 collection.SetElement(segmentName, newValue);
-                (collection as SyncNode)?.Patched?.Invoke();
+                if(collection is SyncNode syncCollection)
+                {
+                    syncCollection?.Patched?.Invoke();
+                }
             }
             else
             {
