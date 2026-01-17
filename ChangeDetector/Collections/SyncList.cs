@@ -4,29 +4,19 @@ using System.Collections.Generic;
 
 namespace Assets.Shared.ChangeDetector.Collections
 {
-
     /// <summary>
     /// Список с поддержкой трекинга и применения патчей.
-    /// 
-    /// Особенности:
-    /// - генерирует CollectionChange при Add/Remove/Replace/Insert/Clear;
-    /// - bubbling изменений от элементов (если они SyncNode) с добавлением индекса в путь;
-    /// - может применить входящий патч (Add/Remove/Replace/Move/Clear).
     /// </summary>
     public sealed class SyncList<TItem> : SyncNode, IList<TItem>, ITrackableCollection
     {
         private readonly List<TItem> _inner = new();
 
+        // Ключ: дочерний SyncNode, значение: делегат, которым мы подписались.
+        private readonly Dictionary<SyncNode, Action<FieldChange>> _childHandlers = new();
+
         /// <inheritdoc />
         public event Action<CollectionChange>? CollectionChanged;
 
-        /// <summary>
-        /// Получение/установка элемента по индексу.
-        /// При установке:
-        /// - отписывается от старого элемента (если он SyncNode);
-        /// - подписывается на новый элемент;
-        /// - генерирует патч Replace.
-        /// </summary>
         public TItem this[int index]
         {
             get => _inner[index];
@@ -36,7 +26,7 @@ namespace Assets.Shared.ChangeDetector.Collections
                 UnwireChild(old);
 
                 _inner[index] = value;
-                WireChild(value, index);
+                WireChild(value);
 
                 CollectionChanged?.Invoke(new CollectionChange(CollectionOpKind.Replace, index, value));
                 RaiseLocalChange($"[{index}]", old, value);
@@ -46,29 +36,25 @@ namespace Assets.Shared.ChangeDetector.Collections
         public int Count => _inner.Count;
         public bool IsReadOnly => false;
 
-        /// <summary>
-        /// Добавляет элемент в конец списка.
-        /// </summary>
         public void Add(TItem item)
         {
+            var index = _inner.Count;
             _inner.Add(item);
-            var index = _inner.Count - 1;
 
-            WireChild(item, index);
+            WireChild(item);
+
             CollectionChanged?.Invoke(new CollectionChange(CollectionOpKind.Add, index, item));
             RaiseLocalChange($"[{index}]", null, item);
         }
 
-        /// <summary>
-        /// Полностью очищает список.
-        /// Отписывает детей и генерирует патч Clear.
-        /// </summary>
         public void Clear()
         {
             foreach (var it in _inner)
                 UnwireChild(it);
 
             _inner.Clear();
+            _childHandlers.Clear();
+
             CollectionChanged?.Invoke(new CollectionChange(CollectionOpKind.Clear, null, null));
             RaiseLocalChange("Clear", null, null);
         }
@@ -77,24 +63,17 @@ namespace Assets.Shared.ChangeDetector.Collections
         public void CopyTo(TItem[] array, int arrayIndex) => _inner.CopyTo(array, arrayIndex);
         public IEnumerator<TItem> GetEnumerator() => _inner.GetEnumerator();
         IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
-
         public int IndexOf(TItem item) => _inner.IndexOf(item);
 
-        /// <summary>
-        /// Вставляет элемент по указанному индексу.
-        /// </summary>
         public void Insert(int index, TItem item)
         {
             _inner.Insert(index, item);
-            WireChild(item, index);
+            WireChild(item);
 
             CollectionChanged?.Invoke(new CollectionChange(CollectionOpKind.Add, index, item));
             RaiseLocalChange($"[{index}]", null, item);
         }
 
-        /// <summary>
-        /// Удаляет первое вхождение элемента.
-        /// </summary>
         public bool Remove(TItem item)
         {
             var index = _inner.IndexOf(item);
@@ -103,9 +82,6 @@ namespace Assets.Shared.ChangeDetector.Collections
             return true;
         }
 
-        /// <summary>
-        /// Удаляет элемент по индексу.
-        /// </summary>
         public void RemoveAt(int index)
         {
             var old = _inner[index];
@@ -117,33 +93,79 @@ namespace Assets.Shared.ChangeDetector.Collections
         }
 
         /// <summary>
-        /// Подписывает дочерний элемент (если он SyncNode) на bubbling изменений.
-        /// К пути добавляется сегмент вида "[index]".
+        /// Тихая вставка для входящих патчей (без событий).
         /// </summary>
-        private void WireChild(TItem item, int index)
+        private void InsertSilent(int index, TItem item)
         {
-            if (item is SyncNode node)
-            {
-                node.Changed += childChange =>
-                {
-                    var newPath = new List<FieldPathSegment> { new FieldPathSegment($"[{index}]") };
-                    newPath.AddRange(childChange.Path);
-                    RaiseChange(new FieldChange(newPath, childChange.OldValue, childChange.NewValue));
+            _inner.Insert(index, item);
+            WireChild(item);
+        }
 
+        /// <summary>
+        /// Тихое удаление для входящих патчей (без событий).
+        /// </summary>
+        private void RemoveAtSilent(int index)
+        {
+            var old = _inner[index];
+            UnwireChild(old);
+            _inner.RemoveAt(index);
+        }
+
+        /// <summary>
+        /// Тихая замена элемента (для входящих патчей).
+        /// </summary>
+        private void SetItemSilent(int index, TItem value)
+        {
+            var old = _inner[index];
+            UnwireChild(old);
+            _inner[index] = value;
+            WireChild(value);
+        }
+
+        /// <summary>
+        /// Подписывает дочерний элемент (если он SyncNode) на bubbling изменений.
+        /// Путь строится на основе актуального индекса элемента в списке.
+        /// </summary>
+        private void WireChild(TItem item)
+        {
+            if (item is not SyncNode node)
+                return;
+
+            // От греха – сначала отписываем, если вдруг уже был.
+            UnwireChild(item);
+
+            Action<FieldChange> handler = childChange =>
+            {
+                // Индекс может меняться, поэтому ищем актуальный.
+                var index = _inner.IndexOf(item);
+                if (index < 0)
+                    return; // элемент уже не в списке, игнорируем.
+
+                var newPath = new List<FieldPathSegment>
+                {
+                    new FieldPathSegment($"[{index}]")
                 };
-            }
+                newPath.AddRange(childChange.Path);
+
+                RaiseChange(new FieldChange(newPath, childChange.OldValue, childChange.NewValue));
+            };
+
+            _childHandlers[node] = handler;
+            node.Changed += handler;
         }
 
         /// <summary>
         /// Отписывает дочерний элемент (если он SyncNode).
-        /// Реализацию можно расширить хранением делегатов в словаре,
-        /// чтобы отписывать конкретные обработчики.
         /// </summary>
         private void UnwireChild(TItem item)
         {
-            if (item is SyncNode node)
+            if (item is not SyncNode node)
+                return;
+
+            if (_childHandlers.TryGetValue(node, out var handler))
             {
-                // TODO: при желании хранить и отписывать конкретный делегат
+                node.Changed -= handler;
+                _childHandlers.Remove(node);
             }
         }
 
@@ -158,30 +180,36 @@ namespace Assets.Shared.ChangeDetector.Collections
                 case CollectionOpKind.Add:
                     {
                         var index = Convert.ToInt32(change.KeyOrIndex);
-                        var value = (TItem)ConvertIfNeeded(change.Value, typeof(TItem));
-                        Insert(index, value);
+                        var value = (TItem)ConvertIfNeeded(change.Value, typeof(TItem))!;
+                        InsertSilent(index, value);
                         break;
                     }
                 case CollectionOpKind.Remove:
                     {
                         var index = Convert.ToInt32(change.KeyOrIndex);
-                        RemoveAt(index);
+                        RemoveAtSilent(index);
                         break;
                     }
                 case CollectionOpKind.Replace:
                     {
                         var index = Convert.ToInt32(change.KeyOrIndex);
-                        var value = (TItem)ConvertIfNeeded(change.Value, typeof(TItem));
-                        this[index] = value;
+                        var value = (TItem)ConvertIfNeeded(change.Value, typeof(TItem))!;
+                        SetItemSilent(index, value);
                         break;
                     }
                 case CollectionOpKind.Clear:
-                    Clear();
+                    // Тихий clear
+                    foreach (var it in _inner)
+                        UnwireChild(it);
+                    _inner.Clear();
+                    _childHandlers.Clear();
                     break;
+
                 case CollectionOpKind.Move:
                     {
                         var (from, to) = (ValueTuple<int, int>)change.KeyOrIndex!;
                         var item = _inner[from];
+                        // Move тоже делаем «тихим».
                         _inner.RemoveAt(from);
                         _inner.Insert(to, item);
                         break;
@@ -189,9 +217,6 @@ namespace Assets.Shared.ChangeDetector.Collections
             }
         }
 
-        /// <summary>
-        /// Простая конвертация значения к требуемому типу.
-        /// </summary>
         private object? ConvertIfNeeded(object? value, Type targetType)
         {
             if (value == null)
@@ -201,5 +226,4 @@ namespace Assets.Shared.ChangeDetector.Collections
             return Convert.ChangeType(value, targetType);
         }
     }
-
 }
