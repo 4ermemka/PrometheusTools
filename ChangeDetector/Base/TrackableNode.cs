@@ -7,7 +7,7 @@ namespace Assets.Shared.ChangeDetector
 {
     /// <summary>
     /// Базовый класс для всех синхронизируемых объектов.
-    /// Отслеживает изменения полей с [Sync] и автоматически подписывается
+    /// Отслеживает изменения полей/свойств с [Sync] и автоматически подписывается
     /// на вложенные TrackableNode.
     /// </summary>
     public abstract class TrackableNode
@@ -17,7 +17,10 @@ namespace Assets.Shared.ChangeDetector
         /// </summary>
         public event Action<FieldChange>? Changed;
 
+        // Карта: имя члена -> является ли он [Sync]
         private readonly Dictionary<string, bool> _syncMap = new();
+
+        // Карта: имя дочернего члена -> TrackableNode (для bubbling)
         private readonly Dictionary<string, TrackableNode?> _childNodes = new();
 
         protected TrackableNode()
@@ -26,7 +29,7 @@ namespace Assets.Shared.ChangeDetector
         }
 
         /// <summary>
-        /// Строит карту sync-полей и подписывает вложенные TrackableNode.
+        /// Строит карту [Sync]-полей/свойств и подписывает вложенные TrackableNode.
         /// </summary>
         private void BuildSyncMapAndWireChildren()
         {
@@ -35,12 +38,19 @@ namespace Assets.Shared.ChangeDetector
 
             foreach (var member in type.GetMembers(flags))
             {
-                var hasSync = member.GetCustomAttribute<SyncAttribute>() != null;
+                if (member is not FieldInfo && member is not PropertyInfo)
+                    continue;
+
+                // Берём только члены, помеченные [Sync]
+                var hasSync = member.GetCustomAttribute<SyncAttribute>(inherit: true) != null;
                 _syncMap[member.Name] = hasSync;
 
-                Type memberType = null;
-                Func<object?> getter = null;
-                Action<object?> setter = null;
+                if (!hasSync)
+                    continue;
+
+                Type? memberType = null;
+                Func<object?>? getter = null;
+                Action<object?>? setter = null;
 
                 if (member is PropertyInfo pi)
                 {
@@ -48,16 +58,15 @@ namespace Assets.Shared.ChangeDetector
                     if (!pi.CanRead)
                         continue;
 
-                    // пропускаем все индексаторы и свойства с параметрами
+                    // Пропускаем индексаторы и свойства с параметрами
                     var indexParams = pi.GetIndexParameters();
-                    if (indexParams != null && indexParams.Length > 0)
+                    if (indexParams is { Length: > 0 })
                         continue;
 
                     var getterMethod = pi.GetGetMethod(true);
                     if (getterMethod == null)
                         continue;
 
-                    // геттер без параметров
                     getter = () => getterMethod.Invoke(this, Array.Empty<object>());
 
                     if (pi.CanWrite)
@@ -73,7 +82,6 @@ namespace Assets.Shared.ChangeDetector
                         }
                     }
                 }
-
                 else if (member is FieldInfo fi)
                 {
                     memberType = fi.FieldType;
@@ -85,6 +93,7 @@ namespace Assets.Shared.ChangeDetector
                 if (memberType == null)
                     continue;
 
+                // Подписываем только TrackableNode-потомков
                 if (!typeof(TrackableNode).IsAssignableFrom(memberType))
                     continue;
 
@@ -100,7 +109,7 @@ namespace Assets.Shared.ChangeDetector
                     if (memberType.IsAbstract)
                         continue;
 
-                    childNode = (TrackableNode)Activator.CreateInstance(memberType);
+                    childNode = (TrackableNode)Activator.CreateInstance(memberType)!;
                     setter?.Invoke(childNode);
                 }
 
@@ -123,6 +132,7 @@ namespace Assets.Shared.ChangeDetector
         {
             return change =>
             {
+                // Префиксуем путь именем [Sync]-члена (например, "Boxes")
                 var newPath = new List<FieldPathSegment> { new FieldPathSegment(childName) };
                 newPath.AddRange(change.Path);
                 RaiseChange(new FieldChange(newPath, change.OldValue, change.NewValue));
@@ -131,6 +141,7 @@ namespace Assets.Shared.ChangeDetector
 
         /// <summary>
         /// Универсальный сеттер для полей/свойств всех наследников.
+        /// Поднимает Changed только для [Sync]-членов и только для локальных изменений.
         /// </summary>
         protected bool SetProperty<T>(
             ref T field,
@@ -145,7 +156,7 @@ namespace Assets.Shared.ChangeDetector
             var oldValue = field;
             field = value;
 
-            // Патч формируем только для локальных изменений
+            // Патч формируем только для локальных изменений и только для [Sync]-членов
             if (!applyPatch &&
                 _syncMap.TryGetValue(propertyName, out var isSync) && isSync)
             {
@@ -161,7 +172,6 @@ namespace Assets.Shared.ChangeDetector
             return true;
         }
 
-
         /// <summary>
         /// Поднимает локальное изменение (без рекурсии по детям).
         /// </summary>
@@ -176,17 +186,12 @@ namespace Assets.Shared.ChangeDetector
         }
 
         /// <summary>
-        /// Поднимает событие Changed для текущего узла.
-        /// 
-        /// Используется как единая точка выхода изменений наружу. Вместо прямого
-        /// вызова события Changed в наследниках следует всегда вызывать этот метод.
-        /// Это также даёт возможность централизованно добавить логирование, фильтрацию
-        /// или буферизацию изменений, не меняя остальной код.
+        /// Единая точка выхода изменений наружу.
+        /// Наследникам следует использовать именно её, а не вызывать Changed напрямую.
         /// </summary>
         protected virtual void RaiseChange(FieldChange change)
         {
             Changed?.Invoke(change);
         }
     }
-
 }

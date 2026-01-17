@@ -67,8 +67,8 @@ namespace Assets.Shared.ChangeDetector
                 if (member is not FieldInfo && member is not PropertyInfo)
                     continue;
 
-                // Пропускаем backing-fields (_xxx)
-                if (member.Name.StartsWith("_", StringComparison.Ordinal))
+                var hasSyncAttr = member.GetCustomAttribute<SyncAttribute>(inherit: true) != null;
+                if (!hasSyncAttr)
                     continue;
 
                 if (member is PropertyInfo pi)
@@ -94,21 +94,17 @@ namespace Assets.Shared.ChangeDetector
 
                 path.Add(new FieldPathSegment(member.Name));
 
-                // 1) Коллекции, поддерживающие снапшот
                 if (typeof(ISnapshotCollection).IsAssignableFrom(memberType) &&
                     valueTarget is ISnapshotCollection targetCollection)
                 {
-                    // valueSource – то, что сериализатор вернул для этой коллекции (обычно такой же тип)
                     targetCollection.ApplySnapshotFrom(valueSource);
                 }
-                // 2) Вложенный SyncNode
                 else if (typeof(SyncNode).IsAssignableFrom(memberType) &&
                          valueSource is SyncNode childSource &&
                          valueTarget is SyncNode childTarget)
                 {
                     ApplySnapshotRecursive(root, childTarget, childSource, path);
                 }
-                // 3) Обычный лист
                 else
                 {
                     var fullPath = new List<FieldPathSegment>(path);
@@ -117,6 +113,7 @@ namespace Assets.Shared.ChangeDetector
 
                 path.RemoveAt(path.Count - 1);
             }
+
         }
 
         /// <summary>
