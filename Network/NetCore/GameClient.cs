@@ -132,6 +132,22 @@ namespace Assets.Scripts.Network.NetCore
 
             switch (type)
             {
+                case MessageType.SnapshotRequest:
+                    {
+                        var request = _serializer.Deserialize<SnapshotRequestMessage>(payload);
+                        if (request == null)
+                            return;
+
+                        // Ответ на SnapshotRequest можно тоже отложить на главный поток,
+                        // если сериализация/доступ к _worldState должна быть на нем.
+                        _mainThreadActions.Enqueue(() =>
+                        {
+                            HandleSnapshotRequest(request);
+                        });
+
+                        break;
+                    }
+
                 case MessageType.Snapshot:
                     {
                         var snapshot = _serializer.Deserialize<SnapshotMessage>(payload);
