@@ -173,7 +173,6 @@ namespace Assets.Scripts.Network.NetCore
             }
         }
 
-
         /// <summary>
         /// Вызывается из MonoBehaviour.Update на главном потоке.
         /// Применяем все накопленные патчи и выполняем отложенные действия.

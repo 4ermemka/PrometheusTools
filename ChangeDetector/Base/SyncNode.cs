@@ -22,15 +22,11 @@ namespace Assets.Shared.ChangeDetector
         public void ApplyPatch(IReadOnlyList<FieldPathSegment> path, object? newValue)
         {
             ApplyPatchInternal(path, 0, newValue);
-            Patched?.Invoke();
         }
 
         /// <summary>
-        /// Применяет полный снапшот: копирует все данные из другого SyncNode
-        /// в текущий экземпляр, рекурсивно по всем полям/свойствам.
-        /// Не поднимает Changed и не генерирует патчи.
+        /// Рекурсивное применение снапшота: копирует значения из source в target.
         /// </summary>
-        /// <param name="source">Источник данных (обычно десериализованный WorldData из снапшота).</param>
         public void ApplySnapshot(SyncNode source)
         {
             if (source == null)
@@ -41,27 +37,26 @@ namespace Assets.Shared.ChangeDetector
                     $"ApplySnapshot type mismatch: source={source.GetType().Name}, target={GetType().Name}");
 
             var path = new List<FieldPathSegment>();
-            ApplySnapshotRecursive(this, source, path);
 
-            Patched?.Invoke();
+            // ВАЖНО: root = this (WorldData), и именно на нём всегда вызывается ApplyPatch.
+            ApplySnapshotRecursive(root: this, target: this, source: source, path);
         }
 
-        /// <summary>
-        /// Рекурсивное применение снапшота: копирует значения из source в target.
-        /// </summary>
-        private static void ApplySnapshotRecursive(SyncNode target, SyncNode source, List<FieldPathSegment> path)
+        private static void ApplySnapshotRecursive(
+            SyncNode root,   // всегда корневой WorldData, именно на нём вызываем ApplyPatch
+            SyncNode target, // текущий узел, по которому бежим рекурсией
+            SyncNode source,
+            List<FieldPathSegment> path)
         {
             var type = target.GetType();
             var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
-            // Берём только поля/свойства, которые реально хотим синхронизировать.
-            // Здесь можно добавить фильтрацию по атрибуту [Sync], если он есть.
             foreach (var member in type.GetMembers(flags))
             {
                 if (member is not FieldInfo && member is not PropertyInfo)
                     continue;
 
-                // Пропускаем backing-fields (_boxData и т.п.), работаем по "публичному" имени.
+                // пропускаем backing-fields
                 if (member.Name.StartsWith("_"))
                     continue;
 
@@ -70,28 +65,26 @@ namespace Assets.Shared.ChangeDetector
                 var valueSource = GetMemberValue(member, source);
                 var valueTarget = GetMemberValue(member, target);
 
+                // добавляем сегмент имени члена
                 path.Add(new FieldPathSegment(member.Name));
 
                 if (typeof(SyncNode).IsAssignableFrom(memberType) &&
                     valueSource is SyncNode childSource &&
                     valueTarget is SyncNode childTarget)
                 {
-                    // защита от рекурсивного "BoxData.BoxData"
-                    if (memberType == type)
-                    {
-                        // это самореферентное поле/свойство, пропускаем
-                        path.RemoveAt(path.Count - 1);
-                        continue;
-                    }
-
-                    ApplySnapshotRecursive(childTarget, childSource, path);
+                    // Вложенный SyncNode: рекурсивно внутрь,
+                    // root остаётся тем же (WorldData), target/source идут вниз.
+                    ApplySnapshotRecursive(root, childTarget, childSource, path);
                 }
                 else
                 {
-                    target.ApplyPatch(path, valueSource);
+                    // Лист: вызываем ApplyPatch на КОРНЕ с ПОЛНЫМ путём.
+                    var fullPath = new List<FieldPathSegment>(path);
+                    root.ApplyPatch(fullPath, valueSource);
+
                 }
 
-
+                // убираем последний сегмент перед переходом к следующему члену
                 path.RemoveAt(path.Count - 1);
             }
         }
@@ -106,7 +99,7 @@ namespace Assets.Shared.ChangeDetector
             var type = GetType();
             var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
-            // сначала backing-field: _boxData
+            // 1. Сначала пробуем backing-field: _boxData, _position и т.п.
             FieldInfo? backingField = null;
             if (!string.IsNullOrEmpty(segmentName))
             {
@@ -117,18 +110,64 @@ namespace Assets.Shared.ChangeDetector
             }
 
             MemberInfo member;
+
             if (backingField != null)
             {
-                member = backingField;
+                member = backingField; // гарантированно FieldInfo → SetMemberValue не тронет SetProperty
             }
             else
             {
-                member = (MemberInfo?)type.GetProperty(segmentName, flags)
-                         ?? type.GetField(segmentName, flags)
+                // 2. Если backing-field нет, работаем как раньше (для несинхронных членов)
+                member = (MemberInfo?)type.GetField(segmentName, flags)
+                         ?? type.GetProperty(segmentName, flags)
                          ?? throw new InvalidOperationException(
                              $"Member '{segmentName}' not found on '{type.Name}'.");
             }
 
+            bool isLast = index == path.Count - 1;
+
+            if (isLast)
+            {
+                SetMemberValue(member, newValue);
+                Patched?.Invoke();
+            }
+            else
+            {
+                var childValue = GetMemberValue(member, this);
+
+                if (childValue is SyncNode childSync)
+                {
+                    childSync.ApplyPatchInternal(path, index + 1, newValue);
+                }
+                else
+                {
+                    throw new InvalidOperationException(
+                        $"Member '{segmentName}' on '{type.Name}' is not SyncNode; cannot continue path.");
+                }
+            }
+        }
+
+
+        private void SetMemberValue(MemberInfo member, object? newValue)
+        {
+            if (member is FieldInfo fi)
+            {
+                // Пишем ТОЛЬКО в поле (в том числе backing-field), минуя сеттеры.
+                var converted = ConvertIfNeeded(newValue, fi.FieldType);
+                fi.SetValue(this, converted);
+                return;
+            }
+
+            if (member is PropertyInfo pi)
+            {
+                // Сюда должны попадать только "несетевые" свойства,
+                // которые НЕ используют SetProperty и не помечены [Sync].
+                var converted = ConvertIfNeeded(newValue, pi.PropertyType);
+                pi.SetValue(this, converted);
+                return;
+            }
+
+            throw new NotSupportedException($"Unsupported member type: {member.MemberType}");
         }
 
         private static Type GetMemberType(MemberInfo member) =>
@@ -146,25 +185,6 @@ namespace Assets.Shared.ChangeDetector
                 FieldInfo fi => fi.GetValue(instance),
                 _ => throw new NotSupportedException($"Unsupported member type: {member.MemberType}")
             };
-
-        private void SetMemberValue(MemberInfo member, object? newValue)
-        {
-            if (member is PropertyInfo pi)
-            {
-                var converted = ConvertIfNeeded(newValue, pi.PropertyType);
-                pi.SetValue(this, converted);
-                return;
-            }
-
-            if (member is FieldInfo fi)
-            {
-                var converted = ConvertIfNeeded(newValue, fi.FieldType);
-                fi.SetValue(this, converted);
-                return;
-            }
-
-            throw new NotSupportedException($"Unsupported member type: {member.MemberType}");
-        }
 
         private object? ConvertIfNeeded(object? value, Type targetType)
         {
