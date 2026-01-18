@@ -1,5 +1,4 @@
 ﻿obj
 .vs
 bin
-*.meta
 *.asmdef
