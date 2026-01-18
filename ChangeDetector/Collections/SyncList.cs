@@ -1,4 +1,5 @@
-﻿using System;
+﻿using Assets.Shared.ChangeDetector.Base;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 
