@@ -1,19 +1,29 @@
 ﻿using Assets.Shared.ChangeDetector;
-using Assets.Shared.ChangeDetector.Base;
 using System;
 using UnityEngine;
 
 namespace Assets.Shared.Model
 {
     [Serializable]
-    public sealed class BoxData : SyncNode // или : TrackableNode, если нужно
+    public class BoxData : SyncNode
     {
+        // ДОЛЖЕН быть [SyncField] и SyncProperty<T>
         [SyncField]
-        public SyncProperty<Vector2> Position { get; set; }
+        public SyncProperty<Vector2> Position { get; set; } = null!;
 
-        public BoxData()
+        // Конструктор для инициализации
+        public BoxData(Vector2 position)
         {
-            Position.Value = new();
+            // Автоматически инициализируется через SyncField,
+            // но можно установить начальное значение:
+            Position.Value = position;
+        }
+
+        // Метод для изменения позиции
+        public void Move(Vector2 newPosition)
+        {
+            // Это вызовет патч!
+            Position.Value = newPosition;
         }
 
         // при необходимости: Id, цвет, имя и т.п.

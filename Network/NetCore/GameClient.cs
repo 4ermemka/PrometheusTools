@@ -36,7 +36,6 @@ namespace Assets.Scripts.Network.NetCore
 
         public event Action ConnectedToHost;
         public event Action DisconnectedFromHost;
-        private bool _isHost;
 
         public GameClient(ITransport transport, SyncNode worldState, IGameSerializer serializer)
         {

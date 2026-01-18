@@ -1,7 +1,6 @@
 ﻿using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.Linq;
 
 namespace Assets.Shared.ChangeDetector.Collections
 {
@@ -14,23 +13,13 @@ namespace Assets.Shared.ChangeDetector.Collections
         ISyncIndexableCollection
     {
         private readonly List<T> _items = new();
-        private readonly IndexTracker<T> _indexTracker;
-
-        // Для элементов SyncNode храним подписки
+        private readonly Dictionary<T, List<int>> _indexMap = new();
         private readonly Dictionary<SyncNode, Action<FieldChange>> _nodeHandlers = new();
 
-        // SyncProperty для отслеживания размера (опционально)
-        [SyncField(TrackChanges = false)]
-        private SyncProperty<int> ItemCount { get; set; } = null!;
-
+        /// <summary>
+        /// Событие изменения коллекции (добавление, удаление, замена)
+        /// </summary>
         public event Action<CollectionChange>? CollectionChanged;
-
-        public SyncList(IEqualityComparer<T>? comparer = null)
-        {
-            _indexTracker = new IndexTracker<T>(comparer);
-            InitializeSyncProperties();
-            UpdateItemCount();
-        }
 
         #region IList<T> Implementation
 
@@ -39,22 +28,32 @@ namespace Assets.Shared.ChangeDetector.Collections
             get => _items[index];
             set
             {
+                if (index < 0 || index >= _items.Count)
+                    throw new IndexOutOfRangeException();
+
                 var oldItem = _items[index];
                 if (EqualityComparer<T>.Default.Equals(oldItem, value))
                     return;
 
+                // Обновляем индексный мап
+                RemoveFromIndexMap(oldItem, index);
+                AddToIndexMap(value, index);
+
+                // Отписываемся от старого элемента, подписываемся на новый
                 UnwireChild(oldItem);
                 _items[index] = value;
                 WireChild(value, index);
 
-                // Обновляем индексный трекер
-                _indexTracker.Remove(oldItem, index);
-                _indexTracker.Add(value, index);
-
                 // Генерируем патч
                 GenerateReplacePatch(index, oldItem, value);
 
-                CollectionChanged?.Invoke(new CollectionChange(CollectionOpKind.Replace, index, value));
+                // Генерируем событие коллекции
+                CollectionChanged?.Invoke(new CollectionChange(
+                    CollectionOpKind.Replace,
+                    index,
+                    value,
+                    oldItem
+                ));
             }
         }
 
@@ -65,10 +64,9 @@ namespace Assets.Shared.ChangeDetector.Collections
         {
             int index = _items.Count;
             _items.Add(item);
-            _indexTracker.Add(item, index);
+            AddToIndexMap(item, index);
 
             WireChild(item, index);
-            UpdateItemCount();
 
             GenerateAddPatch(index, item);
             CollectionChanged?.Invoke(new CollectionChange(CollectionOpKind.Add, index, item));
@@ -82,39 +80,57 @@ namespace Assets.Shared.ChangeDetector.Collections
             }
 
             _items.Clear();
-            _indexTracker.Clear();
+            _indexMap.Clear();
             _nodeHandlers.Clear();
-            UpdateItemCount();
 
             GenerateClearPatch();
             CollectionChanged?.Invoke(new CollectionChange(CollectionOpKind.Clear, null, null));
         }
 
-        public bool Contains(T item) => _indexTracker.GetCount(item) > 0;
+        public bool Contains(T item)
+        {
+            return _indexMap.ContainsKey(item);
+        }
 
-        public void CopyTo(T[] array, int arrayIndex) => _items.CopyTo(array, arrayIndex);
+        public void CopyTo(T[] array, int arrayIndex)
+        {
+            _items.CopyTo(array, arrayIndex);
+        }
 
-        public IEnumerator<T> GetEnumerator() => _items.GetEnumerator();
-        IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+        public IEnumerator<T> GetEnumerator()
+        {
+            return _items.GetEnumerator();
+        }
+
+        IEnumerator IEnumerable.GetEnumerator()
+        {
+            return GetEnumerator();
+        }
 
         public int IndexOf(T item)
         {
-            return _indexTracker.TryGetFirstIndex(item, out var index) ? index : -1;
+            if (_indexMap.TryGetValue(item, out var indices) && indices.Count > 0)
+            {
+                return indices[0];
+            }
+            return -1;
         }
 
         public void Insert(int index, T item)
         {
+            if (index < 0 || index > _items.Count)
+                throw new IndexOutOfRangeException();
+
             _items.Insert(index, item);
 
             // Сдвигаем индексы для элементов после вставки
-            _indexTracker.ShiftIndices(index, 1);
-            _indexTracker.Add(item, index);
+            ShiftIndices(index, 1);
+            AddToIndexMap(item, index);
 
-            // Перенумеровываем подписки
+            // Обновляем подписки
             RenumberSubscriptionsFrom(index, 1);
 
             WireChild(item, index);
-            UpdateItemCount();
 
             GenerateInsertPatch(index, item);
             CollectionChanged?.Invoke(new CollectionChange(CollectionOpKind.Add, index, item));
@@ -122,9 +138,9 @@ namespace Assets.Shared.ChangeDetector.Collections
 
         public bool Remove(T item)
         {
-            if (_indexTracker.TryGetFirstIndex(item, out var index))
+            if (_indexMap.TryGetValue(item, out var indices) && indices.Count > 0)
             {
-                RemoveAt(index);
+                RemoveAt(indices[0]);
                 return true;
             }
             return false;
@@ -132,22 +148,23 @@ namespace Assets.Shared.ChangeDetector.Collections
 
         public void RemoveAt(int index)
         {
+            if (index < 0 || index >= _items.Count)
+                throw new IndexOutOfRangeException();
+
             var item = _items[index];
             _items.RemoveAt(index);
 
             UnwireChild(item);
-            _indexTracker.Remove(item, index);
+            RemoveFromIndexMap(item, index);
 
             // Сдвигаем индексы для элементов после удаления
-            _indexTracker.ShiftIndices(index + 1, -1);
+            ShiftIndices(index + 1, -1);
 
-            // Перенумеровываем подписки
+            // Обновляем подписки
             RenumberSubscriptionsFrom(index + 1, -1);
 
-            UpdateItemCount();
-
             GenerateRemovePatch(index, item);
-            CollectionChanged?.Invoke(new CollectionChange(CollectionOpKind.Remove, index, item));
+            CollectionChanged?.Invoke(new CollectionChange(CollectionOpKind.Remove, index, null, item));
         }
 
         #endregion
@@ -209,7 +226,7 @@ namespace Assets.Shared.ChangeDetector.Collections
 
             // Полностью заменяем коллекцию
             _items.Clear();
-            _indexTracker.Clear();
+            _indexMap.Clear();
             _nodeHandlers.Clear();
 
             // Добавляем новые элементы
@@ -217,12 +234,11 @@ namespace Assets.Shared.ChangeDetector.Collections
             foreach (var item in source)
             {
                 _items.Add(item);
-                _indexTracker.Add(item, index);
+                AddToIndexMap(item, index);
                 WireChild(item, index);
                 index++;
             }
 
-            UpdateItemCount();
             SnapshotApplied?.Invoke();
         }
 
@@ -270,38 +286,71 @@ namespace Assets.Shared.ChangeDetector.Collections
         {
             if (delta == 0) return;
 
-            // Обновляем подписки для элементов SyncNode
-            foreach (var kvp in _nodeHandlers.ToList())
+            // Нужно найти все SyncNode элементы и обновить их обработчики
+            for (int i = Math.Max(0, fromIndex); i < _items.Count; i++)
             {
-                var node = kvp.Key;
-
-                // Ищем новый индекс элемента
-                for (int i = 0; i < _items.Count; i++)
+                if (_items[i] is SyncNode node && _nodeHandlers.TryGetValue(node, out var oldHandler))
                 {
-                    if (ReferenceEquals(_items[i], node))
+                    // Создаем новый обработчик с правильным индексом
+                    node.Changed -= oldHandler;
+
+                    int currentIndex = i; // Захватываем текущий индекс
+                    Action<FieldChange> newHandler = change =>
                     {
-                        // Нашли элемент, нужно обновить обработчик
-                        if (i >= fromIndex)
+                        var path = new List<FieldPathSegment>
                         {
-                            // Создаем новый обработчик с правильным индексом
-                            var oldHandler = kvp.Value;
-                            node.Changed -= oldHandler;
+                            new FieldPathSegment($"[{currentIndex}]")
+                        };
+                        path.AddRange(change.Path);
 
-                            Action<FieldChange> newHandler = change =>
-                            {
-                                var path = new List<FieldPathSegment>
-                                {
-                                    new FieldPathSegment($"[{i}]")
-                                };
-                                path.AddRange(change.Path);
+                        RaiseChange(new FieldChange(path, change.OldValue, change.NewValue));
+                    };
 
-                                RaiseChange(new FieldChange(path, change.OldValue, change.NewValue));
-                            };
+                    _nodeHandlers[node] = newHandler;
+                    node.Changed += newHandler;
+                }
+            }
+        }
 
-                            _nodeHandlers[node] = newHandler;
-                            node.Changed += newHandler;
-                        }
-                        break;
+        #endregion
+
+        #region Index Map Management
+
+        private void AddToIndexMap(T item, int index)
+        {
+            if (!_indexMap.TryGetValue(item, out var indices))
+            {
+                indices = new List<int>();
+                _indexMap[item] = indices;
+            }
+
+            // Вставляем с сохранением порядка
+            var insertPos = indices.BinarySearch(index);
+            if (insertPos < 0) insertPos = ~insertPos;
+            indices.Insert(insertPos, index);
+        }
+
+        private void RemoveFromIndexMap(T item, int index)
+        {
+            if (_indexMap.TryGetValue(item, out var indices))
+            {
+                indices.Remove(index);
+                if (indices.Count == 0)
+                {
+                    _indexMap.Remove(item);
+                }
+            }
+        }
+
+        private void ShiftIndices(int fromIndex, int delta)
+        {
+            foreach (var indices in _indexMap.Values)
+            {
+                for (int i = 0; i < indices.Count; i++)
+                {
+                    if (indices[i] >= fromIndex)
+                    {
+                        indices[i] += delta;
                     }
                 }
             }
@@ -331,47 +380,28 @@ namespace Assets.Shared.ChangeDetector.Collections
 
         private void GenerateInsertPatch(int index, T item)
         {
-            // Вставка - это частный случай добавления
             GenerateAddPatch(index, item);
         }
 
         private void GenerateClearPatch()
         {
-            // Для очистки генерируем специальный патч
             var path = new List<FieldPathSegment> { new FieldPathSegment("Clear") };
             RaiseChange(new FieldChange(path, null, null));
         }
 
         #endregion
 
-        #region Helpers
+        #region Helper Methods
 
-        private void UpdateItemCount()
+        private object? ConvertIfNeeded(object? value, Type targetType)
         {
-            if (ItemCount != null)
-            {
-                ItemCount.Value = _items.Count;
-            }
-        }
+            if (value == null)
+                return targetType.IsValueType ? Activator.CreateInstance(targetType) : null;
 
-        private static bool TryParseIndex(string segmentName, out int index)
-        {
-            if (PathHelper.IsCollectionIndex(segmentName))
-            {
-                try
-                {
-                    index = PathHelper.ParseListIndex(segmentName);
-                    return true;
-                }
-                catch
-                {
-                    index = -1;
-                    return false;
-                }
-            }
+            if (targetType.IsInstanceOfType(value))
+                return value;
 
-            index = -1;
-            return false;
+            return Convert.ChangeType(value, targetType);
         }
 
         #endregion
@@ -380,7 +410,6 @@ namespace Assets.Shared.ChangeDetector.Collections
 
         /// <summary>
         /// Применяет патч к списку (на принимающей стороне).
-        /// Используется при получении CollectionChange по сети.
         /// </summary>
         public void ApplyCollectionChange(CollectionChange change)
         {
@@ -417,6 +446,7 @@ namespace Assets.Shared.ChangeDetector.Collections
                         var item = _items[from];
                         _items.RemoveAt(from);
                         _items.Insert(to, item);
+                        UpdateIndexMapAfterMove(from, to);
                         RenumberSubscriptionsAfterMove(from, to);
                         break;
                     }
@@ -426,11 +456,10 @@ namespace Assets.Shared.ChangeDetector.Collections
         private void InsertSilent(int index, T item)
         {
             _items.Insert(index, item);
-            _indexTracker.ShiftIndices(index, 1);
-            _indexTracker.Add(item, index);
+            ShiftIndices(index, 1);
+            AddToIndexMap(item, index);
             RenumberSubscriptionsFrom(index, 1);
             WireChild(item, index);
-            UpdateItemCount();
         }
 
         private void RemoveAtSilent(int index)
@@ -438,10 +467,9 @@ namespace Assets.Shared.ChangeDetector.Collections
             var item = _items[index];
             _items.RemoveAt(index);
             UnwireChild(item);
-            _indexTracker.Remove(item, index);
-            _indexTracker.ShiftIndices(index + 1, -1);
+            RemoveFromIndexMap(item, index);
+            ShiftIndices(index + 1, -1);
             RenumberSubscriptionsFrom(index + 1, -1);
-            UpdateItemCount();
         }
 
         private void SetItemSilent(int index, T value)
@@ -449,8 +477,8 @@ namespace Assets.Shared.ChangeDetector.Collections
             var oldItem = _items[index];
             UnwireChild(oldItem);
             _items[index] = value;
-            _indexTracker.Remove(oldItem, index);
-            _indexTracker.Add(value, index);
+            RemoveFromIndexMap(oldItem, index);
+            AddToIndexMap(value, index);
             WireChild(value, index);
         }
 
@@ -461,17 +489,52 @@ namespace Assets.Shared.ChangeDetector.Collections
                 UnwireChild(item);
             }
             _items.Clear();
-            _indexTracker.Clear();
+            _indexMap.Clear();
             _nodeHandlers.Clear();
-            UpdateItemCount();
+        }
+
+        private void UpdateIndexMapAfterMove(int fromIndex, int toIndex)
+        {
+            // Обновляем индексный мап после перемещения
+            var item = _items[toIndex]; // item теперь на новой позиции
+
+            if (_indexMap.TryGetValue(item, out var indices))
+            {
+                indices.Remove(fromIndex);
+
+                var insertPos = indices.BinarySearch(toIndex);
+                if (insertPos < 0) insertPos = ~insertPos;
+                indices.Insert(insertPos, toIndex);
+            }
+
+            // Обновляем индексы элементов между fromIndex и toIndex
+            int start = Math.Min(fromIndex, toIndex);
+            int end = Math.Max(fromIndex, toIndex);
+            int direction = fromIndex < toIndex ? -1 : 1;
+
+            for (int i = start; i <= end; i++)
+            {
+                if (i == toIndex) continue;
+
+                var currentItem = _items[i];
+                if (_indexMap.TryGetValue(currentItem, out var currentIndices))
+                {
+                    for (int j = 0; j < currentIndices.Count; j++)
+                    {
+                        if (currentIndices[j] == i)
+                        {
+                            currentIndices[j] += direction;
+                            break;
+                        }
+                    }
+                }
+            }
         }
 
         private void RenumberSubscriptionsAfterMove(int fromIndex, int toIndex)
         {
-            // При перемещении нужно обновить все подписки между fromIndex и toIndex
             int start = Math.Min(fromIndex, toIndex);
             int end = Math.Max(fromIndex, toIndex);
-            int delta = fromIndex < toIndex ? -1 : 1;
 
             for (int i = start; i <= end; i++)
             {
@@ -480,11 +543,12 @@ namespace Assets.Shared.ChangeDetector.Collections
                     // Обновляем обработчик с новым индексом
                     node.Changed -= handler;
 
+                    int currentIndex = i; // Захватываем текущий индекс
                     Action<FieldChange> newHandler = change =>
                     {
                         var path = new List<FieldPathSegment>
                         {
-                            new FieldPathSegment($"[{i}]")
+                            new FieldPathSegment($"[{currentIndex}]")
                         };
                         path.AddRange(change.Path);
 

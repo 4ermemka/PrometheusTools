@@ -3,12 +3,12 @@
 namespace Assets.Shared.ChangeDetector
 {
     /// <summary>
-    /// Вспомогательные методы для работы с путями
+    /// Вспомогательные методы для работы с путями.
     /// </summary>
     public static class PathHelper
     {
         /// <summary>
-        /// Проверяет, является ли сегмент индексом коллекции
+        /// Проверяет, является ли сегмент индексом коллекции.
         /// </summary>
         public static bool IsCollectionIndex(string segment)
         {
@@ -19,7 +19,7 @@ namespace Assets.Shared.ChangeDetector
         }
 
         /// <summary>
-        /// Извлекает индекс из сегмента [index]
+        /// Извлекает индекс из сегмента [index].
         /// </summary>
         public static int ParseListIndex(string segment)
         {
@@ -34,7 +34,7 @@ namespace Assets.Shared.ChangeDetector
         }
 
         /// <summary>
-        /// Извлекает ключ из сегмента ["key"] или ['key']
+        /// Извлекает ключ из сегмента ["key"] или ['key'].
         /// </summary>
         public static string ParseDictionaryKey(string segment)
         {
@@ -43,7 +43,6 @@ namespace Assets.Shared.ChangeDetector
 
             var content = segment.Substring(1, segment.Length - 2);
 
-            // Убираем кавычки если есть
             if ((content.StartsWith("\"") && content.EndsWith("\"")) ||
                 (content.StartsWith("'") && content.EndsWith("'")))
             {
@@ -54,12 +53,12 @@ namespace Assets.Shared.ChangeDetector
         }
 
         /// <summary>
-        /// Создает сегмент пути для индекса списка
+        /// Создает сегмент пути для индекса списка.
         /// </summary>
         public static string CreateIndexSegment(int index) => $"[{index}]";
 
         /// <summary>
-        /// Создает сегмент пути для ключа словаря
+        /// Создает сегмент пути для ключа словаря.
         /// </summary>
         public static string CreateKeySegment(string key) => $"[\"{key}\"]";
     }
