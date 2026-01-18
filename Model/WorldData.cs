@@ -12,16 +12,5 @@ namespace Assets.Shared.Model
         [SyncField]
         public SyncList<BoxData> Boxes { get; private set; } = new();
 
-        // Подписка на изменения
-        public WorldData()
-        {
-            // Подписываемся на изменения во всем WorldData
-            Changed += change =>
-            {
-                Debug.Log($"Патч сгенерирован: {string.Join(".", change.Path.Select(p => p.Name))}");
-                Debug.Log($"Старое значение: {change.OldValue}, Новое: {change.NewValue}");
-
-            };
-        }
     }
 }

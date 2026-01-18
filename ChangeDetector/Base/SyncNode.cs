@@ -219,15 +219,6 @@ namespace Assets.Shared.ChangeDetector
             return (Delegate)genericMethod.Invoke(this, new object[] { propertyName });
         }
 
-        private Action<T> CreatePatchedHandlerGeneric<T>(string propertyName)
-        {
-            return value =>
-            {
-                Patched?.Invoke();
-                OnPropertyPatched(propertyName, value);
-            };
-        }
-
         protected virtual void OnPropertyPatched(string propertyName, object? value)
         {
             PropertyPatched?.Invoke(propertyName, value);
@@ -253,6 +244,7 @@ namespace Assets.Shared.ChangeDetector
         {
             var segment = path[index];
 
+            // Проверяем, является ли текущий объект коллекцией
             if (this is ISyncIndexableCollection collection && PathHelper.IsCollectionIndex(segment.Name))
             {
                 ApplyPatchIntoCollection(collection, path, index, newValue);
@@ -267,19 +259,41 @@ namespace Assets.Shared.ChangeDetector
 
             if (isLast)
             {
+                // Конечный путь: устанавливаем значение
                 ApplyPatchToProperty(metadata, newValue);
                 Patched?.Invoke();
             }
             else
             {
+                // Продолжаем путь вглубь
                 var childValue = GetPropertyValue(metadata);
-                ContinuePatch(childValue, path, index + 1, newValue);
+
+                // Если childValue - это SyncNode, продолжаем путь в нем
+                if (childValue is SyncNode childSync)
+                {
+                    childSync.ApplyPatchInternal(path, index + 1, newValue);
+                }
+                // Если это коллекция
+                else if (childValue is ISyncIndexableCollection syncIndexablecollection)
+                {
+                    ApplyPatchIntoCollection(syncIndexablecollection, path, index + 1, newValue);
+                }
+                else if (childValue == null)
+                {
+                    throw new InvalidOperationException(
+                        $"Property '{segment.Name}' is null, cannot continue path.");
+                }
+                else
+                {
+                    throw new InvalidOperationException(
+                        $"Property '{segment.Name}' is not SyncNode or collection.");
+                }
             }
         }
-
+        
         /// <summary>
-        /// Применяет патч к свойству.
-        /// </summary>
+         /// Применяет патч к свойству.
+         /// </summary>
         private void ApplyPatchToProperty(PropertyMetadata metadata, object? newValue)
         {
             if (!metadata.ReceivePatches)
@@ -289,12 +303,24 @@ namespace Assets.Shared.ChangeDetector
             if (syncProperty == null)
                 return;
 
-            var applyPatchMethod = metadata.SyncPropertyType.GetMethod("ApplyPatch");
-            if (applyPatchMethod == null)
-                return;
+            // Если это SyncProperty<T> - вызываем ApplyPatch
+            if (metadata.SyncPropertyType.IsGenericType &&
+                metadata.SyncPropertyType.GetGenericTypeDefinition() == typeof(SyncProperty<>))
+            {
+                var applyPatchMethod = metadata.SyncPropertyType.GetMethod("ApplyPatch");
+                if (applyPatchMethod == null)
+                    return;
 
-            var convertedValue = ConvertIfNeeded(newValue, metadata.PropertyType);
-            applyPatchMethod.Invoke(syncProperty, new[] { convertedValue });
+                var convertedValue = ConvertIfNeeded(newValue, metadata.PropertyType);
+                applyPatchMethod.Invoke(syncProperty, new[] { convertedValue });
+            }
+            // Если это SyncNode (например, SyncList) - делегируем дальше
+            else if (syncProperty is SyncNode node)
+            {
+                // Для SyncNode нельзя применить патч напрямую
+                // Нужно продолжать путь, но это обрабатывается в ApplyPatchInternal
+                throw new InvalidOperationException($"Cannot apply patch directly to SyncNode property '{metadata.Name}'");
+            }
         }
 
         /// <summary>
@@ -306,28 +332,20 @@ namespace Assets.Shared.ChangeDetector
             if (syncProperty == null)
                 return null;
 
-            var valueProperty = metadata.SyncPropertyType.GetProperty("Value");
-            return valueProperty?.GetValue(syncProperty);
-        }
+            // Для SyncProperty<T> - возвращаем Value
+            if (metadata.SyncPropertyType.IsGenericType &&
+                metadata.SyncPropertyType.GetGenericTypeDefinition() == typeof(SyncProperty<>))
+            {
+                var valueProperty = metadata.SyncPropertyType.GetProperty("Value");
+                return valueProperty?.GetValue(syncProperty);
+            }
+            // Для SyncNode - возвращаем сам объект
+            else if (syncProperty is SyncNode node)
+            {
+                return node;
+            }
 
-        /// <summary>
-        /// Продолжает путь патча.
-        /// </summary>
-        private void ContinuePatch(object? childValue, IReadOnlyList<FieldPathSegment> path, int index, object? newValue)
-        {
-            if (childValue is ISyncIndexableCollection collection)
-            {
-                ApplyPatchIntoCollection(collection, path, index, newValue);
-            }
-            else if (childValue is SyncNode childSync)
-            {
-                childSync.ApplyPatchInternal(path, index, newValue);
-            }
-            else
-            {
-                throw new InvalidOperationException(
-                    $"Cannot continue path: value is not SyncNode or collection.");
-            }
+            return syncProperty;
         }
 
         /// <summary>
@@ -473,27 +491,41 @@ namespace Assets.Shared.ChangeDetector
 
                 foreach (var prop in properties)
                 {
-                    if (!prop.PropertyType.IsGenericType ||
-                        prop.PropertyType.GetGenericTypeDefinition() != typeof(SyncProperty<>))
+                    var syncFieldAttr = prop.GetCustomAttribute<SyncFieldAttribute>(inherit: true);
+                    if (syncFieldAttr == null)
                         continue;
 
-                    var attr = prop.GetCustomAttribute<SyncFieldAttribute>(inherit: true);
-                    if (attr == null)
-                        continue;
+                    Type? propertyType = null;
+                    Type? syncPropertyType = null;
 
-                    var propertyType = prop.PropertyType.GetGenericArguments()[0];
-                    var syncPropertyType = typeof(SyncProperty<>).MakeGenericType(propertyType);
+                    // 1. SyncProperty<T>
+                    if (prop.PropertyType.IsGenericType &&
+                        prop.PropertyType.GetGenericTypeDefinition() == typeof(SyncProperty<>))
+                    {
+                        propertyType = prop.PropertyType.GetGenericArguments()[0];
+                        syncPropertyType = typeof(SyncProperty<>).MakeGenericType(propertyType);
+                    }
+                    // 2. SyncNode (включая SyncList<T>)
+                    else if (typeof(SyncNode).IsAssignableFrom(prop.PropertyType))
+                    {
+                        propertyType = prop.PropertyType;
+                        syncPropertyType = prop.PropertyType; // Для SyncNode syncPropertyType = сам тип
+                    }
+                    else
+                    {
+                        continue; // Неподдерживаемый тип
+                    }
 
                     var getter = CreatePropertyGetter(prop);
                     var setter = CreatePropertySetter(prop);
 
                     result.Add(new PropertyMetadata(
                         name: prop.Name,
-                        propertyType: propertyType,
-                        syncPropertyType: syncPropertyType,
-                        trackChanges: attr.TrackChanges,
-                        receivePatches: attr.ReceivePatches,
-                        ignoreInSnapshot: attr.IgnoreInSnapshot,
+                        propertyType: propertyType!,
+                        syncPropertyType: syncPropertyType!,
+                        trackChanges: syncFieldAttr.TrackChanges,
+                        receivePatches: syncFieldAttr.ReceivePatches,
+                        ignoreInSnapshot: syncFieldAttr.IgnoreInSnapshot,
                         getter: getter,
                         setter: setter
                     ));
@@ -502,7 +534,7 @@ namespace Assets.Shared.ChangeDetector
                 return result;
             });
         }
-
+        
         private static Func<SyncNode, object?> CreatePropertyGetter(PropertyInfo prop)
         {
             var getMethod = prop.GetGetMethod(true);
