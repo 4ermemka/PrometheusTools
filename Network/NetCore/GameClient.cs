@@ -1,4 +1,5 @@
 ﻿using Assets.Shared.ChangeDetector;
+using Assets.Shared.ChangeDetector.Base;
 using Assets.Shared.ChangeDetector.Base.Mapping;
 using Assets.Shared.Model;
 using Assets.Shared.Network.NetCore;

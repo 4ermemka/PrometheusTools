@@ -1,4 +1,5 @@
 ﻿using Assets.Shared.ChangeDetector;
+using Assets.Shared.ChangeDetector.Base;
 using System;
 using UnityEngine;
 
@@ -7,14 +8,8 @@ namespace Assets.Shared.Model
     [Serializable]
     public sealed class BoxData : SyncNode // или : TrackableNode, если нужно
     {
-        private Vector2 _position;
-
-        [Sync]
-        public Vector2 Position
-        {
-            get => _position;
-            set => SetProperty(ref _position, value);
-        }
+        [SyncField]
+        public SyncProperty<Vector2> Position { get; set; } = null!;
 
         // при необходимости: Id, цвет, имя и т.п.
     }

@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 
-namespace Assets.Shared.ChangeDetector.Base
+namespace Assets.Shared.ChangeDetector
 {
     /// <summary>
     /// Обертка для синхронизируемого свойства с разделением входящих/исходящих изменений
@@ -11,11 +11,11 @@ namespace Assets.Shared.ChangeDetector.Base
         private T _value;
         private readonly string _propertyName;
         private readonly SyncNode _owner;
-        private readonly bool _trackChanges; // Генерировать ли исходящие изменения
-        private readonly bool _receivePatches; // Принимать ли входящие патчи
+        private readonly bool _trackChanges;
+        private readonly bool _receivePatches;
 
-        public event Action<T>? ValueChanged; // Срабатывает при ЛЮБОМ изменении
-        public event Action<T>? Patched; // Срабатывает только при применении патча из сети
+        public event Action<T>? ValueChanged;
+        public event Action<T>? Patched;
 
         public T Value
         {
@@ -28,8 +28,7 @@ namespace Assets.Shared.ChangeDetector.Base
                 var oldValue = _value;
                 _value = value;
 
-                // Локальное изменение - генерируем патч для сети
-                if (_trackChanges)
+                if (_trackChanges && _owner != null)
                 {
                     _owner.RaisePropertyChange(_propertyName, oldValue, value);
                 }
@@ -68,7 +67,16 @@ namespace Assets.Shared.ChangeDetector.Base
             ValueChanged?.Invoke(newValue);
         }
 
-        // Операторы для удобства
+        /// <summary>
+        /// Получить значение для снапшота
+        /// </summary>
+        public T GetSnapshotValue() => _value;
+
+        /// <summary>
+        /// Применить значение из снапшота
+        /// </summary>
+        public void ApplySnapshot(T snapshotValue) => _value = snapshotValue;
+
         public static implicit operator T(SyncProperty<T> property) => property.Value;
 
         public override bool Equals(object obj) =>

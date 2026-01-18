@@ -1,225 +1,382 @@
-﻿using Assets.Shared.ChangeDetector.Base;
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace Assets.Shared.ChangeDetector.Collections
 {
     /// <summary>
     /// Список с поддержкой трекинга, патчей и снапшотов.
     /// </summary>
-    public sealed class SyncList<TItem> : SyncNode,
-        IList<TItem>,
-        ITrackableCollection,
+    public sealed class SyncList<T> : SyncNode,
+        IList<T>,
         ISnapshotCollection,
         ISyncIndexableCollection
     {
-        private readonly List<TItem> _inner = new();
+        private readonly List<T> _items = new();
+        private readonly IndexTracker<T> _indexTracker;
 
-        // Ключ: дочерний SyncNode, значение: делегат, которым мы подписались.
-        private readonly Dictionary<SyncNode, Action<FieldChange>> _childHandlers = new();
+        // Для элементов SyncNode храним подписки
+        private readonly Dictionary<SyncNode, Action<FieldChange>> _nodeHandlers = new();
 
-        /// <inheritdoc />
+        // SyncProperty для отслеживания размера (опционально)
+        [SyncField(TrackChanges = false)]
+        private SyncProperty<int> ItemCount { get; set; } = null!;
+
         public event Action<CollectionChange>? CollectionChanged;
 
-        public TItem this[int index]
+        public SyncList(IEqualityComparer<T>? comparer = null)
         {
-            get => _inner[index];
+            _indexTracker = new IndexTracker<T>(comparer);
+            InitializeSyncProperties();
+            UpdateItemCount();
+        }
+
+        #region IList<T> Implementation
+
+        public T this[int index]
+        {
+            get => _items[index];
             set
             {
-                var old = _inner[index];
-                UnwireChild(old);
+                var oldItem = _items[index];
+                if (EqualityComparer<T>.Default.Equals(oldItem, value))
+                    return;
 
-                _inner[index] = value;
-                WireChild(value);
+                UnwireChild(oldItem);
+                _items[index] = value;
+                WireChild(value, index);
+
+                // Обновляем индексный трекер
+                _indexTracker.Remove(oldItem, index);
+                _indexTracker.Add(value, index);
+
+                // Генерируем патч
+                GenerateReplacePatch(index, oldItem, value);
 
                 CollectionChanged?.Invoke(new CollectionChange(CollectionOpKind.Replace, index, value));
-                RaiseLocalChange($"[{index}]", old, value);
             }
         }
 
-        // ISyncIndexableCollection
-
-        int ISyncIndexableCollection.Count => _inner.Count;
-
-        object? ISyncIndexableCollection.GetElement(string segmentName)
-        {
-            if (!TryParseIndex(segmentName, out var index))
-                throw new InvalidOperationException($"Invalid index segment '{segmentName}' for SyncList.");
-
-            return _inner[index];
-        }
-
-        void ISyncIndexableCollection.SetElement(string segmentName, object? value)
-        {
-            if (!TryParseIndex(segmentName, out var index))
-                throw new InvalidOperationException($"Invalid index segment '{segmentName}' for SyncList.");
-
-            var elementType = typeof(TItem);
-            var converted = (TItem?)ConvertIfNeeded(value, elementType);
-            _inner[index] = converted!;
-        }
-
-        // ISnapshotCollection
-
-        void ISnapshotCollection.ApplySnapshotFrom(object? sourceCollection)
-        {
-            if (sourceCollection is not IEnumerable sourceEnumerable)
-                throw new InvalidOperationException();
-
-            foreach (var it in _inner)
-                UnwireChild(it);
-
-            _inner.Clear();
-            _childHandlers.Clear();
-
-            foreach (var obj in sourceEnumerable)
-            {
-                var item = (TItem?)ConvertIfNeeded(obj, typeof(TItem));
-                _inner.Add(item!);
-                WireChild(item!);
-            }
-
-            // вся коллекция приведена к снапшоту – уведомляем
-            SnapshotApplied?.Invoke();
-        }
-
-
-        public int Count => _inner.Count;
+        public int Count => _items.Count;
         public bool IsReadOnly => false;
 
-        public void Add(TItem item)
+        public void Add(T item)
         {
-            var index = _inner.Count;
-            _inner.Add(item);
+            int index = _items.Count;
+            _items.Add(item);
+            _indexTracker.Add(item, index);
 
-            WireChild(item);
+            WireChild(item, index);
+            UpdateItemCount();
 
+            GenerateAddPatch(index, item);
             CollectionChanged?.Invoke(new CollectionChange(CollectionOpKind.Add, index, item));
-            RaiseLocalChange($"[{index}]", null, item);
         }
 
         public void Clear()
         {
-            foreach (var it in _inner)
-                UnwireChild(it);
+            foreach (var item in _items)
+            {
+                UnwireChild(item);
+            }
 
-            _inner.Clear();
-            _childHandlers.Clear();
+            _items.Clear();
+            _indexTracker.Clear();
+            _nodeHandlers.Clear();
+            UpdateItemCount();
 
+            GenerateClearPatch();
             CollectionChanged?.Invoke(new CollectionChange(CollectionOpKind.Clear, null, null));
-            RaiseLocalChange("Clear", null, null);
         }
 
-        public bool Contains(TItem item) => _inner.Contains(item);
-        public void CopyTo(TItem[] array, int arrayIndex) => _inner.CopyTo(array, arrayIndex);
-        public IEnumerator<TItem> GetEnumerator() => _inner.GetEnumerator();
+        public bool Contains(T item) => _indexTracker.GetCount(item) > 0;
+
+        public void CopyTo(T[] array, int arrayIndex) => _items.CopyTo(array, arrayIndex);
+
+        public IEnumerator<T> GetEnumerator() => _items.GetEnumerator();
         IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
-        public int IndexOf(TItem item) => _inner.IndexOf(item);
 
-        public void Insert(int index, TItem item)
+        public int IndexOf(T item)
         {
-            _inner.Insert(index, item);
-            WireChild(item);
-
-            CollectionChanged?.Invoke(new CollectionChange(CollectionOpKind.Add, index, item));
-            RaiseLocalChange($"[{index}]", null, item);
+            return _indexTracker.TryGetFirstIndex(item, out var index) ? index : -1;
         }
 
-        public bool Remove(TItem item)
+        public void Insert(int index, T item)
         {
-            var index = _inner.IndexOf(item);
-            if (index < 0) return false;
-            RemoveAt(index);
-            return true;
+            _items.Insert(index, item);
+
+            // Сдвигаем индексы для элементов после вставки
+            _indexTracker.ShiftIndices(index, 1);
+            _indexTracker.Add(item, index);
+
+            // Перенумеровываем подписки
+            RenumberSubscriptionsFrom(index, 1);
+
+            WireChild(item, index);
+            UpdateItemCount();
+
+            GenerateInsertPatch(index, item);
+            CollectionChanged?.Invoke(new CollectionChange(CollectionOpKind.Add, index, item));
+        }
+
+        public bool Remove(T item)
+        {
+            if (_indexTracker.TryGetFirstIndex(item, out var index))
+            {
+                RemoveAt(index);
+                return true;
+            }
+            return false;
         }
 
         public void RemoveAt(int index)
         {
-            var old = _inner[index];
-            UnwireChild(old);
-            _inner.RemoveAt(index);
+            var item = _items[index];
+            _items.RemoveAt(index);
 
-            CollectionChanged?.Invoke(new CollectionChange(CollectionOpKind.Remove, index, old));
-            RaiseLocalChange($"[{index}]", old, null);
-        }
-
-        /// <summary>
-        /// Тихая вставка для входящих патчей (без событий).
-        /// </summary>
-        private void InsertSilent(int index, TItem item)
-        {
-            _inner.Insert(index, item);
-            WireChild(item);
-        }
-
-        /// <summary>
-        /// Тихое удаление для входящих патчей (без событий).
-        /// </summary>
-        private void RemoveAtSilent(int index)
-        {
-            var old = _inner[index];
-            UnwireChild(old);
-            _inner.RemoveAt(index);
-        }
-
-        /// <summary>
-        /// Тихая замена элемента (для входящих патчей).
-        /// </summary>
-        private void SetItemSilent(int index, TItem value)
-        {
-            var old = _inner[index];
-            UnwireChild(old);
-            _inner[index] = value;
-            WireChild(value);
-        }
-
-        /// <summary>
-        /// Подписывает дочерний элемент (если он SyncNode) на bubbling изменений.
-        /// Путь строится на основе актуального индекса элемента в списке.
-        /// </summary>
-        private void WireChild(TItem item)
-        {
-            if (item is not SyncNode node)
-                return;
-
-            // От греха – сначала отписываем, если вдруг уже был.
             UnwireChild(item);
+            _indexTracker.Remove(item, index);
 
-            Action<FieldChange> handler = childChange =>
-            {
-                // Индекс может меняться, поэтому ищем актуальный.
-                var index = _inner.IndexOf(item);
-                if (index < 0)
-                    return; // элемент уже не в списке, игнорируем.
+            // Сдвигаем индексы для элементов после удаления
+            _indexTracker.ShiftIndices(index + 1, -1);
 
-                var newPath = new List<FieldPathSegment>
-                {
-                    new FieldPathSegment($"[{index}]")
-                };
-                newPath.AddRange(childChange.Path);
+            // Перенумеровываем подписки
+            RenumberSubscriptionsFrom(index + 1, -1);
 
-                RaiseChange(new FieldChange(newPath, childChange.OldValue, childChange.NewValue));
-            };
+            UpdateItemCount();
 
-            _childHandlers[node] = handler;
-            node.Changed += handler;
+            GenerateRemovePatch(index, item);
+            CollectionChanged?.Invoke(new CollectionChange(CollectionOpKind.Remove, index, item));
         }
 
-        /// <summary>
-        /// Отписывает дочерний элемент (если он SyncNode).
-        /// </summary>
-        private void UnwireChild(TItem item)
-        {
-            if (item is not SyncNode node)
-                return;
+        #endregion
 
-            if (_childHandlers.TryGetValue(node, out var handler))
+        #region ISyncIndexableCollection Implementation
+
+        int ISyncIndexableCollection.Count => _items.Count;
+
+        object? ISyncIndexableCollection.GetElement(string segmentName)
+        {
+            if (!PathHelper.IsCollectionIndex(segmentName))
+                throw new InvalidOperationException($"Invalid index segment '{segmentName}' for SyncList.");
+
+            var index = PathHelper.ParseListIndex(segmentName);
+            if (index < 0 || index >= _items.Count)
+                throw new IndexOutOfRangeException($"Index {index} is out of range [0, {_items.Count}).");
+
+            return _items[index];
+        }
+
+        void ISyncIndexableCollection.SetElement(string segmentName, object? value)
+        {
+            if (!PathHelper.IsCollectionIndex(segmentName))
+                throw new InvalidOperationException($"Invalid index segment '{segmentName}' for SyncList.");
+
+            var index = PathHelper.ParseListIndex(segmentName);
+            var converted = (T?)ConvertIfNeeded(value, typeof(T));
+
+            if (index == _items.Count)
             {
-                node.Changed -= handler;
-                _childHandlers.Remove(node);
+                // Добавление в конец
+                Add(converted!);
+            }
+            else if (index >= 0 && index < _items.Count)
+            {
+                // Замена существующего
+                this[index] = converted!;
+            }
+            else
+            {
+                throw new IndexOutOfRangeException($"Index {index} is out of range [0, {_items.Count}].");
             }
         }
+
+        #endregion
+
+        #region ISnapshotCollection Implementation
+
+        void ISnapshotCollection.ApplySnapshotFrom(object? sourceCollection)
+        {
+            if (sourceCollection is not IEnumerable<T> source)
+                throw new InvalidOperationException($"Source must be IEnumerable<{typeof(T).Name}>.");
+
+            // Отписываемся от старых элементов
+            foreach (var item in _items)
+            {
+                UnwireChild(item);
+            }
+
+            // Полностью заменяем коллекцию
+            _items.Clear();
+            _indexTracker.Clear();
+            _nodeHandlers.Clear();
+
+            // Добавляем новые элементы
+            int index = 0;
+            foreach (var item in source)
+            {
+                _items.Add(item);
+                _indexTracker.Add(item, index);
+                WireChild(item, index);
+                index++;
+            }
+
+            UpdateItemCount();
+            SnapshotApplied?.Invoke();
+        }
+
+        #endregion
+
+        #region Child Wiring
+
+        private void WireChild(T item, int index)
+        {
+            if (item is SyncNode node)
+            {
+                // Отписываемся если уже подписаны
+                if (_nodeHandlers.ContainsKey(node))
+                {
+                    UnwireChild(item);
+                }
+
+                Action<FieldChange> handler = change =>
+                {
+                    // Строим полный путь: [index] + внутренний путь
+                    var path = new List<FieldPathSegment>
+                    {
+                        new FieldPathSegment($"[{index}]")
+                    };
+                    path.AddRange(change.Path);
+
+                    RaiseChange(new FieldChange(path, change.OldValue, change.NewValue));
+                };
+
+                _nodeHandlers[node] = handler;
+                node.Changed += handler;
+            }
+        }
+
+        private void UnwireChild(T item)
+        {
+            if (item is SyncNode node && _nodeHandlers.TryGetValue(node, out var handler))
+            {
+                node.Changed -= handler;
+                _nodeHandlers.Remove(node);
+            }
+        }
+
+        private void RenumberSubscriptionsFrom(int fromIndex, int delta)
+        {
+            if (delta == 0) return;
+
+            // Обновляем подписки для элементов SyncNode
+            foreach (var kvp in _nodeHandlers.ToList())
+            {
+                var node = kvp.Key;
+
+                // Ищем новый индекс элемента
+                for (int i = 0; i < _items.Count; i++)
+                {
+                    if (ReferenceEquals(_items[i], node))
+                    {
+                        // Нашли элемент, нужно обновить обработчик
+                        if (i >= fromIndex)
+                        {
+                            // Создаем новый обработчик с правильным индексом
+                            var oldHandler = kvp.Value;
+                            node.Changed -= oldHandler;
+
+                            Action<FieldChange> newHandler = change =>
+                            {
+                                var path = new List<FieldPathSegment>
+                                {
+                                    new FieldPathSegment($"[{i}]")
+                                };
+                                path.AddRange(change.Path);
+
+                                RaiseChange(new FieldChange(path, change.OldValue, change.NewValue));
+                            };
+
+                            _nodeHandlers[node] = newHandler;
+                            node.Changed += newHandler;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        #endregion
+
+        #region Patch Generation
+
+        private void GenerateAddPatch(int index, T item)
+        {
+            var path = new List<FieldPathSegment> { new FieldPathSegment($"[{index}]") };
+            RaiseChange(new FieldChange(path, null, item));
+        }
+
+        private void GenerateRemovePatch(int index, T item)
+        {
+            var path = new List<FieldPathSegment> { new FieldPathSegment($"[{index}]") };
+            RaiseChange(new FieldChange(path, item, null));
+        }
+
+        private void GenerateReplacePatch(int index, T oldItem, T newItem)
+        {
+            var path = new List<FieldPathSegment> { new FieldPathSegment($"[{index}]") };
+            RaiseChange(new FieldChange(path, oldItem, newItem));
+        }
+
+        private void GenerateInsertPatch(int index, T item)
+        {
+            // Вставка - это частный случай добавления
+            GenerateAddPatch(index, item);
+        }
+
+        private void GenerateClearPatch()
+        {
+            // Для очистки генерируем специальный патч
+            var path = new List<FieldPathSegment> { new FieldPathSegment("Clear") };
+            RaiseChange(new FieldChange(path, null, null));
+        }
+
+        #endregion
+
+        #region Helpers
+
+        private void UpdateItemCount()
+        {
+            if (ItemCount != null)
+            {
+                ItemCount.Value = _items.Count;
+            }
+        }
+
+        private static bool TryParseIndex(string segmentName, out int index)
+        {
+            if (PathHelper.IsCollectionIndex(segmentName))
+            {
+                try
+                {
+                    index = PathHelper.ParseListIndex(segmentName);
+                    return true;
+                }
+                catch
+                {
+                    index = -1;
+                    return false;
+                }
+            }
+
+            index = -1;
+            return false;
+        }
+
+        #endregion
+
+        #region ApplyCollectionChange (для обратной совместимости)
 
         /// <summary>
         /// Применяет патч к списку (на принимающей стороне).
@@ -232,7 +389,7 @@ namespace Assets.Shared.ChangeDetector.Collections
                 case CollectionOpKind.Add:
                     {
                         var index = Convert.ToInt32(change.KeyOrIndex);
-                        var value = (TItem)ConvertIfNeeded(change.Value, typeof(TItem))!;
+                        var value = (T)ConvertIfNeeded(change.Value, typeof(T))!;
                         InsertSilent(index, value);
                         break;
                     }
@@ -245,55 +402,101 @@ namespace Assets.Shared.ChangeDetector.Collections
                 case CollectionOpKind.Replace:
                     {
                         var index = Convert.ToInt32(change.KeyOrIndex);
-                        var value = (TItem)ConvertIfNeeded(change.Value, typeof(TItem))!;
+                        var value = (T)ConvertIfNeeded(change.Value, typeof(T))!;
                         SetItemSilent(index, value);
                         break;
                     }
                 case CollectionOpKind.Clear:
                     {
-                        foreach (var it in _inner)
-                            UnwireChild(it);
-                        _inner.Clear();
-                        _childHandlers.Clear();
+                        ClearSilent();
                         break;
                     }
                 case CollectionOpKind.Move:
                     {
                         var (from, to) = (ValueTuple<int, int>)change.KeyOrIndex!;
-                        var item = _inner[from];
-                        _inner.RemoveAt(from);
-                        _inner.Insert(to, item);
+                        var item = _items[from];
+                        _items.RemoveAt(from);
+                        _items.Insert(to, item);
+                        RenumberSubscriptionsAfterMove(from, to);
                         break;
                     }
             }
         }
 
-        private static bool TryParseIndex(string segmentName, out int index)
+        private void InsertSilent(int index, T item)
         {
-            if (!string.IsNullOrEmpty(segmentName) &&
-                segmentName[0] == '[' &&
-                segmentName[^1] == ']')
+            _items.Insert(index, item);
+            _indexTracker.ShiftIndices(index, 1);
+            _indexTracker.Add(item, index);
+            RenumberSubscriptionsFrom(index, 1);
+            WireChild(item, index);
+            UpdateItemCount();
+        }
+
+        private void RemoveAtSilent(int index)
+        {
+            var item = _items[index];
+            _items.RemoveAt(index);
+            UnwireChild(item);
+            _indexTracker.Remove(item, index);
+            _indexTracker.ShiftIndices(index + 1, -1);
+            RenumberSubscriptionsFrom(index + 1, -1);
+            UpdateItemCount();
+        }
+
+        private void SetItemSilent(int index, T value)
+        {
+            var oldItem = _items[index];
+            UnwireChild(oldItem);
+            _items[index] = value;
+            _indexTracker.Remove(oldItem, index);
+            _indexTracker.Add(value, index);
+            WireChild(value, index);
+        }
+
+        private void ClearSilent()
+        {
+            foreach (var item in _items)
             {
-                segmentName = segmentName.Substring(1, segmentName.Length - 2);
+                UnwireChild(item);
             }
-
-            return int.TryParse(segmentName, out index);
+            _items.Clear();
+            _indexTracker.Clear();
+            _nodeHandlers.Clear();
+            UpdateItemCount();
         }
 
-        private object? ConvertIfNeeded(object? value, Type targetType)
+        private void RenumberSubscriptionsAfterMove(int fromIndex, int toIndex)
         {
-            if (value == null)
-                return targetType.IsValueType ? Activator.CreateInstance(targetType) : null;
-            if (targetType.IsInstanceOfType(value))
-                return value;
-            return Convert.ChangeType(value, targetType);
+            // При перемещении нужно обновить все подписки между fromIndex и toIndex
+            int start = Math.Min(fromIndex, toIndex);
+            int end = Math.Max(fromIndex, toIndex);
+            int delta = fromIndex < toIndex ? -1 : 1;
+
+            for (int i = start; i <= end; i++)
+            {
+                if (_items[i] is SyncNode node && _nodeHandlers.TryGetValue(node, out var handler))
+                {
+                    // Обновляем обработчик с новым индексом
+                    node.Changed -= handler;
+
+                    Action<FieldChange> newHandler = change =>
+                    {
+                        var path = new List<FieldPathSegment>
+                        {
+                            new FieldPathSegment($"[{i}]")
+                        };
+                        path.AddRange(change.Path);
+
+                        RaiseChange(new FieldChange(path, change.OldValue, change.NewValue));
+                    };
+
+                    _nodeHandlers[node] = newHandler;
+                    node.Changed += newHandler;
+                }
+            }
         }
 
-        // Явная реализация IList<T> для совместимости
-        TItem IList<TItem>.this[int index]
-        {
-            get => this[index];
-            set => this[index] = value;
-        }
+        #endregion
     }
 }
