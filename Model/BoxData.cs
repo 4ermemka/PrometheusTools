@@ -9,7 +9,12 @@ namespace Assets.Shared.Model
     public sealed class BoxData : SyncNode // или : TrackableNode, если нужно
     {
         [SyncField]
-        public SyncProperty<Vector2> Position { get; set; } = null!;
+        public SyncProperty<Vector2> Position { get; set; }
+
+        public BoxData()
+        {
+            Position.Value = new();
+        }
 
         // при необходимости: Id, цвет, имя и т.п.
     }

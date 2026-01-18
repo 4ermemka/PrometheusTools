@@ -99,11 +99,32 @@ namespace Assets.Shared.ChangeDetector
         /// </summary>
         private void SubscribeToPatchedEvents(string propertyName, object syncProperty)
         {
-            var patchedEvent = syncProperty.GetType().GetEvent("Patched");
-            if (patchedEvent != null)
+            if (syncProperty is SyncNode syncNode)
             {
-                var handler = CreatePatchedHandler(propertyName);
-                patchedEvent.AddEventHandler(syncProperty, handler);
+                // Для любого SyncNode (включая SyncList)
+                syncNode.Patched += () =>
+                {
+                    Patched?.Invoke();
+                    OnPropertyPatched(propertyName, syncProperty);
+                };
+            }
+            else
+            {
+                // Для SyncProperty<T> - старая логика
+                var patchedEvent = syncProperty.GetType().GetEvent("Patched");
+                if (patchedEvent != null)
+                {
+                    // Упрощенная версия - подписываемся только если можем
+                    try
+                    {
+                        var handler = CreatePatchedHandler(propertyName);
+                        patchedEvent.AddEventHandler(syncProperty, handler);
+                    }
+                    catch
+                    {
+                        // Игнорируем если не удалось подписаться
+                    }
+                }
             }
         }
 
