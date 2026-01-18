@@ -218,30 +218,30 @@ namespace Assets.Shared.ChangeDetector.Collections
             if (sourceCollection is not IEnumerable<T> source)
                 throw new InvalidOperationException($"Source must be IEnumerable<{typeof(T).Name}>.");
 
-            // Отписываемся от старых элементов
+            // 1. Отписываемся от старых элементов
             foreach (var item in _items)
             {
                 UnwireChild(item);
             }
 
-            // Полностью заменяем коллекцию
+            // 2. Полностью очищаем коллекцию
             _items.Clear();
             _indexMap.Clear();
             _nodeHandlers.Clear();
 
-            // Добавляем новые элементы
+            // 3. Добавляем новые элементы (тихо, без генерации патчей)
             int index = 0;
             foreach (var item in source)
             {
                 _items.Add(item);
                 AddToIndexMap(item, index);
-                WireChild(item, index);
+                WireChild(item, index); // Подписываемся на новые элементы
                 index++;
             }
 
+            // 4. Уведомляем о применении снапшота
             SnapshotApplied?.Invoke();
         }
-
         #endregion
 
         #region Child Wiring

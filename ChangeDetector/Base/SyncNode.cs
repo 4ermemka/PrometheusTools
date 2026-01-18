@@ -420,41 +420,75 @@ namespace Assets.Shared.ChangeDetector
                 if (metadata.IgnoreInSnapshot)
                     continue;
 
-                var syncPropertySource = metadata.Getter(source);
-                var syncPropertyTarget = metadata.Getter(target);
+                var sourceValue = GetPropertyValue(metadata, source);
+                var targetValue = GetPropertyValue(metadata, target);
 
-                if (syncPropertySource == null || syncPropertyTarget == null)
+                if (sourceValue == null && targetValue == null)
                     continue;
 
                 path.Add(new FieldPathSegment(metadata.Name));
 
-                var getValueMethod = metadata.SyncPropertyType.GetProperty("Value")?.GetGetMethod();
-                var setValueMethod = metadata.SyncPropertyType.GetProperty("Value")?.GetSetMethod();
-
-                if (getValueMethod != null && setValueMethod != null)
+                // 1. Обработка ISnapshotCollection (SyncList, SyncDictionary)
+                if (targetValue is ISnapshotCollection targetCollection)
                 {
-                    var sourceValue = getValueMethod.Invoke(syncPropertySource, null);
-                    var targetValue = getValueMethod.Invoke(syncPropertyTarget, null);
-
-                    if (typeof(ISnapshotCollection).IsAssignableFrom(metadata.PropertyType) &&
-                        targetValue is ISnapshotCollection targetCollection)
+                    targetCollection.ApplySnapshotFrom(sourceValue);
+                }
+                // 2. Обработка SyncNode (вложенные объекты)
+                else if (sourceValue is SyncNode childSource &&
+                         targetValue is SyncNode childTarget)
+                {
+                    ApplySnapshotRecursive(root, childTarget, childSource, path);
+                }
+                // 3. Обработка SyncProperty<T> и простых значений
+                else
+                {
+                    // Для SyncProperty<T> - вызываем ApplySnapshot
+                    if (metadata.SyncPropertyType.IsGenericType &&
+                        metadata.SyncPropertyType.GetGenericTypeDefinition() == typeof(SyncProperty<>))
                     {
-                        targetCollection.ApplySnapshotFrom(sourceValue);
+                        var syncPropertyTarget = metadata.Getter(target);
+                        if (syncPropertyTarget != null)
+                        {
+                            var applySnapshotMethod = metadata.SyncPropertyType.GetMethod("ApplySnapshot");
+                            if (applySnapshotMethod != null)
+                            {
+                                applySnapshotMethod.Invoke(syncPropertyTarget, new[] { sourceValue });
+                            }
+                        }
                     }
-                    else if (typeof(SyncNode).IsAssignableFrom(metadata.PropertyType) &&
-                             sourceValue is SyncNode childSource &&
-                             targetValue is SyncNode childTarget)
-                    {
-                        ApplySnapshotRecursive(root, childTarget, childSource, path);
-                    }
+                    // Для простых значений - через SetProperty
                     else
                     {
-                        setValueMethod.Invoke(syncPropertyTarget, new[] { sourceValue });
+                        // Если свойство имеет сеттер - используем его
+                        metadata.Setter?.Invoke(target, sourceValue);
                     }
                 }
 
                 path.RemoveAt(path.Count - 1);
             }
+        }
+
+        // Вспомогательный метод для получения значения свойства
+        private static object? GetPropertyValue(PropertyMetadata metadata, SyncNode instance)
+        {
+            var syncProperty = metadata.Getter(instance);
+            if (syncProperty == null)
+                return null;
+
+            // Для SyncProperty<T> - возвращаем Value
+            if (metadata.SyncPropertyType.IsGenericType &&
+                metadata.SyncPropertyType.GetGenericTypeDefinition() == typeof(SyncProperty<>))
+            {
+                var valueProperty = metadata.SyncPropertyType.GetProperty("Value");
+                return valueProperty?.GetValue(syncProperty);
+            }
+            // Для SyncNode - возвращаем сам объект
+            else if (syncProperty is SyncNode node)
+            {
+                return node;
+            }
+
+            return syncProperty;
         }
 
         // =============== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ===============
