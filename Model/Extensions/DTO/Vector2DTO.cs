@@ -7,6 +7,14 @@ public class Vector2Dto
     public float x { get; set; }
     public float y { get; set; }
 
+    public Vector2Dto() { }
+
+    public Vector2Dto(float x, float y)
+    {
+        this.x = x;
+        this.y = y;
+    }
+    // Для отладки
     public static Vector2Dto Zero()
     {
         return new Vector2Dto()
@@ -24,5 +32,7 @@ public class Vector2Dto
             y = 1
         };
     }
+
+    public override string ToString() => $"({x}, {y})";
 }
 
