@@ -311,8 +311,7 @@ namespace Assets.Shared.ChangeDetector
                 if (applyPatchMethod == null)
                     return;
 
-                var convertedValue = ConvertIfNeeded(newValue, metadata.PropertyType);
-                applyPatchMethod.Invoke(syncProperty, new[] { convertedValue });
+                applyPatchMethod.Invoke(syncProperty, new[] { newValue });
             }
             // Если это SyncNode (например, SyncList) - делегируем дальше
             else if (syncProperty is SyncNode node)

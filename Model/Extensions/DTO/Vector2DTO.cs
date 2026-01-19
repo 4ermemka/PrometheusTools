@@ -1,6 +1,7 @@
 using Newtonsoft.Json;
-using UnityEngine;
+using System;
 
+[Serializable]
 public class Vector2Dto
 {
     [JsonProperty("x")]
