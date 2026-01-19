@@ -178,30 +178,41 @@ namespace Assets.Shared.ChangeDetector
 
         private void SubscribeToPatchedEvents(string propertyName, object syncProperty)
         {
-            var patchedEvent = syncProperty.GetType().GetEvent("Patched");
-            if (patchedEvent != null)
+            var syncPropertyType = syncProperty.GetType();
+            if (!syncPropertyType.IsGenericType ||
+                syncPropertyType.GetGenericTypeDefinition() != typeof(SyncProperty<>))
             {
-                var handler = Delegate.CreateDelegate(
-                    patchedEvent.EventHandlerType,
-                    this,
-                    GetType().GetMethod("OnChildPatched", BindingFlags.NonPublic | BindingFlags.Instance)
-                );
-                patchedEvent.AddEventHandler(syncProperty, handler);
+                return;
+            }
+
+            // Получаем тип значения SyncProperty<T>
+            var valueType = syncPropertyType.GetGenericArguments()[0];
+
+            // Используем generic метод для безопасной подписки
+            var subscribeMethod = GetType()
+                .GetMethod("SubscribeToSyncPropertyPatched", BindingFlags.NonPublic | BindingFlags.Instance);
+
+            if (subscribeMethod != null)
+            {
+                try
+                {
+                    var genericMethod = subscribeMethod.MakeGenericMethod(valueType);
+                    genericMethod.Invoke(this, new object[] { propertyName, syncProperty });
+                }
+                catch (Exception ex)
+                {
+                    // Debug.LogError($"Failed to subscribe to Patched event for {propertyName}: {ex.Message}");
+                }
             }
         }
 
-        private void OnChildPatched(object sender, EventArgs e)
+        private void SubscribeToSyncPropertyPatched<T>(string propertyName, SyncProperty<T> syncProperty)
         {
-            // Находим имя свойства по объекту
-            foreach (var kvp in _syncProperties)
+            syncProperty.Patched += value =>
             {
-                if (ReferenceEquals(kvp.Value, sender))
-                {
-                    Patched?.Invoke();
-                    OnPropertyPatched(kvp.Key, sender);
-                    return;
-                }
-            }
+                Patched?.Invoke();
+                OnPropertyPatched(propertyName, value);
+            };
         }
 
         protected virtual void OnPropertyPatched(string propertyName, object? value)
@@ -226,7 +237,7 @@ namespace Assets.Shared.ChangeDetector
         {
             var segment = path[index];
 
-            if (this is ISyncIndexableCollection collection && PathHelper.IsCollectionIndex(segment.Name))
+            if (this is ISyncIndexableCollection collection && int.TryParse(segment.Name, out _))
             {
                 ApplyPatchIntoCollection(collection, path, index, newValue);
                 return;
