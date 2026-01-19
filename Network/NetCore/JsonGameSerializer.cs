@@ -1,5 +1,6 @@
 ﻿using Assets.Shared.ChangeDetector;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Serialization;
 using System;
 using System.Collections.Generic;
 using System.Text;
@@ -43,6 +44,87 @@ namespace Assets.Scripts.Network.NetCore
             {
                 writer.WriteNull();
             }
+        }
+    }
+
+    // Для патчей (быстрый, без информации о типах)
+    public sealed class PatchSerializer : IGameSerializer
+    {
+        private static readonly JsonSerializerSettings Settings = new JsonSerializerSettings
+        {
+            ReferenceLoopHandling = ReferenceLoopHandling.Ignore,
+            TypeNameHandling = TypeNameHandling.None, // Без информации о типах
+            Formatting = Formatting.None,
+            Converters = new List<JsonConverter>
+        {
+            new SyncPropertyValueConverter() // Только значения
+        }
+        };
+
+        public byte[] Serialize<T>(T obj)
+        {
+            var json = JsonConvert.SerializeObject(obj, Settings);
+            return Encoding.UTF8.GetBytes(json);
+        }
+
+        public T Deserialize<T>(byte[] bytes)
+        {
+            var json = Encoding.UTF8.GetString(bytes);
+            return JsonConvert.DeserializeObject<T>(json, Settings);
+        }
+    }
+
+    // Для снапшотов (с информацией о типах)
+    public sealed class SnapshotSerializer : IGameSerializer
+    {
+        private static readonly JsonSerializerSettings Settings = new JsonSerializerSettings
+        {
+            ReferenceLoopHandling = ReferenceLoopHandling.Ignore,
+            TypeNameHandling = TypeNameHandling.All, // Полная информация о типах
+            Formatting = Formatting.None,
+            SerializationBinder = new SimpleTypeNameBinder(), // Кастомный биндер
+            Converters = new List<JsonConverter>
+        {
+            new SyncPropertyValueConverter()
+        }
+        };
+
+        public byte[] Serialize<T>(T obj)
+        {
+            var json = JsonConvert.SerializeObject(obj, Settings);
+            return Encoding.UTF8.GetBytes(json);
+        }
+
+        public T Deserialize<T>(byte[] bytes)
+        {
+            var json = Encoding.UTF8.GetString(bytes);
+            return JsonConvert.DeserializeObject<T>(json, Settings);
+        }
+    }
+
+    // Упрощенный биндер для работы с типами в Unity
+    public class SimpleTypeNameBinder : DefaultSerializationBinder
+    {
+        public override Type BindToType(string assemblyName, string typeName)
+        {
+            // Игнорируем информацию о сборке, ищем только по имени типа
+            if (string.IsNullOrEmpty(assemblyName))
+            {
+                return Type.GetType(typeName);
+            }
+
+            // Пробуем найти тип в текущей сборке
+            var type = Type.GetType($"{typeName}, {assemblyName}");
+            if (type != null) return type;
+
+            // Пробуем найти в текущем домене приложения
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                type = assembly.GetType(typeName);
+                if (type != null) return type;
+            }
+
+            return base.BindToType(assemblyName, typeName);
         }
     }
 
