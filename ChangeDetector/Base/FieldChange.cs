@@ -13,19 +13,17 @@ namespace Assets.Shared.ChangeDetector
         public IReadOnlyList<FieldPathSegment> Path { get; }
         public object? OldValue { get; }
         public object? NewValue { get; }
-    
+
         public FieldChange(IReadOnlyList<FieldPathSegment> path, object? oldValue, object? newValue)
         {
-            Path = path ?? throw new ArgumentNullException(nameof(path));
+            Path = path;
             OldValue = oldValue;
             NewValue = newValue;
         }
-    
+
         public override string ToString()
         {
             return $"[{string.Join(".", Path.Select(p => p.Name))}] {OldValue} → {NewValue}";
         }
     }
-
-
 }

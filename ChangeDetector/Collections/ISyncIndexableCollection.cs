@@ -1,21 +1,13 @@
 ﻿namespace Assets.Shared.ChangeDetector.Collections
 {
-    /// <summary>
-    /// Коллекция, которая может применить полный снапшот своего содержимого.
-    /// </summary>
-    public interface ISnapshotCollection : ITrackableCollection
+    public interface ISnapshotCollection
     {
-        void ApplySnapshotFrom(object? sourceCollection);
+        void ApplySnapshotFrom(object? sourceValue);
     }
 
-    /// <summary>
-    /// Коллекция, в которую можно адресоваться по сегменту пути (индекс/ключ).
-    /// </summary>
-    public interface ISyncIndexableCollection : ITrackableCollection
+    public interface ISyncIndexableCollection
     {
-        int Count { get; }
-
-        object? GetElement(string segmentName);
-        void SetElement(string segmentName, object? value);
+        object? GetElement(string index);
+        void SetElement(string index, object? value);
     }
 }

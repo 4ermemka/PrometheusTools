@@ -1,33 +1,21 @@
-﻿using System.Collections;
-using UnityEngine;
-
-namespace Assets.Shared.ChangeDetector
+﻿namespace Assets.Shared.ChangeDetector
 {
     /// <summary>
-    /// Описание изменения коллекции (патч).
+    /// Изменение коллекции
     /// </summary>
-    public sealed class CollectionChange
+    public struct CollectionChange
     {
-        /// <summary>
-        /// Тип операции (добавление, удаление, замена, перемещение, очистка).
-        /// </summary>
         public CollectionOpKind Kind { get; }
-
-        /// <summary>
-        /// Индекс, ключ или другая идентификация элемента (в зависимости от коллекции).
-        /// </summary>
         public object? KeyOrIndex { get; }
-
-        /// <summary>
-        /// Добавляемое/новое значение (если требуется для операции).
-        /// </summary>
         public object? Value { get; }
+        public object? OldValue { get; }
 
-        public CollectionChange(CollectionOpKind kind, object? keyOrIndex, object? value)
+        public CollectionChange(CollectionOpKind kind, object? keyOrIndex, object? value, object? oldValue = null)
         {
             Kind = kind;
             KeyOrIndex = keyOrIndex;
             Value = value;
+            OldValue = oldValue;
         }
     }
 }

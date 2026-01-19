@@ -1,22 +1,38 @@
-using Assets.Shared.ChangeDetector.Base;
-using UnityEngine;
+using Newtonsoft.Json;
+using System;
 
-[SyncDto(typeof(Vector2))]
-public sealed class Vector2Dto : ISyncValueMapper
+[Serializable]
+public class Vector2Dto
 {
     public float x { get; set; }
     public float y { get; set; }
 
-    public object ToDto(object modelValue)
+    public Vector2Dto() { }
+
+    public Vector2Dto(float x, float y)
     {
-        var v = (Vector2)modelValue;
-        return new Vector2Dto { x = v.x, y = v.y };
+        this.x = x;
+        this.y = y;
+    }
+    // Для отладки
+    public static Vector2Dto Zero()
+    {
+        return new Vector2Dto()
+        {
+            x = 0,
+            y = 0
+        };
     }
 
-    public object FromDto(object dtoValue)
+    public static Vector2Dto One()
     {
-        var dto = (Vector2Dto)dtoValue;
-        return new Vector2(dto.x, dto.y);
+        return new Vector2Dto()
+        {
+            x = 1,
+            y = 1
+        };
     }
+
+    public override string ToString() => $"({x}, {y})";
 }
 
