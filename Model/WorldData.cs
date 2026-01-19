@@ -1,8 +1,6 @@
 ﻿using Assets.Shared.ChangeDetector;
 using Assets.Shared.ChangeDetector.Collections;
 using System;
-using System.Linq;
-using UnityEngine;
 
 namespace Assets.Shared.Model
 {
@@ -11,6 +9,5 @@ namespace Assets.Shared.Model
     {
         [SyncField]
         public SyncList<BoxData> Boxes { get; private set; } = new();
-
     }
 }
