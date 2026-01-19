@@ -183,9 +183,8 @@ namespace Assets.Scripts.Network.NetCore
             // 1. Применяем входящие патчи (Position и любые другие поля WorldData)
             while (_incomingPatches.TryDequeue(out var patch))
             {
-                var value = SyncValueConverter.FromDtoIfNeeded(patch.NewValue);
                 Debug.Log($"[GameClient] Applying patch: {string.Join(".", patch.Path.Select(p => p.Name))} -> {patch.NewValue}");
-                _worldState.ApplyPatch(patch.Path, value);
+                _worldState.ApplyPatch(patch.Path, patch.NewValue);
             }
 
             // 2. Выполняем отложенные действия (например, применение снапшота)
@@ -237,12 +236,11 @@ namespace Assets.Scripts.Network.NetCore
                 return;
 
             var path = new List<FieldPathSegment>(change.Path);
-            var newValue = SyncValueConverter.ToDtoIfNeeded(change.NewValue);
 
             var patch = new PatchMessage
             {
                 Path = path,
-                NewValue = newValue
+                NewValue = change.NewValue
             };
 
             Debug.Log($"[CLIENT] MakePacket patch to send: {string.Join(".", patch.Path.Select(p => p.Name))}: {patch.NewValue}");
