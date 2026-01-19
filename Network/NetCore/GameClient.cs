@@ -27,8 +27,6 @@ namespace Assets.Scripts.Network.NetCore
         private readonly ITransport _transport;
         private readonly SyncNode _worldState;          // WorldData : SyncNode
         private readonly IGameSerializer _serializer;
-        private readonly IGameSerializer _patchSerializer;
-        private readonly IGameSerializer _snapshotSerializer;
 
         // Очередь входящих патчей, применяемых на главном потоке.
         private readonly ConcurrentQueue<PatchMessage> _incomingPatches = new();
@@ -39,13 +37,11 @@ namespace Assets.Scripts.Network.NetCore
         public event Action ConnectedToHost;
         public event Action DisconnectedFromHost;
 
-        public GameClient(ITransport transport, SyncNode worldState, IGameSerializer serializer, IGameSerializer patchSerializer, IGameSerializer snapshotSerializer)
+        public GameClient(ITransport transport, SyncNode worldState, IGameSerializer serializer)
         {
             _transport = transport ?? throw new ArgumentNullException(nameof(transport));
             _worldState = worldState ?? throw new ArgumentNullException(nameof(worldState));
             _serializer = serializer ?? throw new ArgumentNullException(nameof(serializer));
-            _patchSerializer = patchSerializer ?? throw new ArgumentNullException(nameof(patchSerializer));
-            _snapshotSerializer = snapshotSerializer ?? throw new ArgumentNullException(nameof(snapshotSerializer));
 
             _transport.Connected += OnConnected;
             _transport.Disconnected += OnDisconnected;
@@ -157,7 +153,7 @@ namespace Assets.Scripts.Network.NetCore
             try
             {
                 // request.RequestorClientId – тот, кому сервер потом перешлёт Snapshot.
-                var worldBytes = _snapshotSerializer.Serialize(_worldState); // _worldState : WorldData : SyncNode
+                var worldBytes = _serializer.Serialize(_worldState); // _worldState : WorldData : SyncNode
 
                 var snapshot = new SnapshotMessage
                 {
@@ -210,7 +206,7 @@ namespace Assets.Scripts.Network.NetCore
         /// </summary>
         private void ApplySnapshot(SnapshotMessage snapshot)
         {
-            var newWorldData = _snapshotSerializer.Deserialize<WorldData>(snapshot.WorldDataPayload);
+            var newWorldData = _serializer.Deserialize<WorldData>(snapshot.WorldDataPayload);
             if (newWorldData == null)
             {
                 Debug.LogWarning("[CLIENT] ApplySnapshot: deserialized WorldData is null.");
@@ -272,7 +268,7 @@ namespace Assets.Scripts.Network.NetCore
 
         private ArraySegment<byte> MakePacket<T>(MessageType type, T message)
         {
-            var payload = _patchSerializer.Serialize(message);
+            var payload = _serializer.Serialize(message);
             var result = new byte[1 + 4 + payload.Length];
             result[0] = (byte)type;
             var len = payload.Length;

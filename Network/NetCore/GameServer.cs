@@ -21,8 +21,6 @@ namespace Assets.Scripts.Network.NetCore
     {
         private readonly ITransport _transport;
         private readonly IGameSerializer _serializer;
-        private readonly IGameSerializer _patchSerializer;
-        private readonly IGameSerializer _snapshotSerializer;
 
         // Простейшее хранение подключённых клиентов
         private readonly HashSet<Guid> _clients = new HashSet<Guid>();
@@ -30,12 +28,10 @@ namespace Assets.Scripts.Network.NetCore
         // Первый подключившийся клиент считаем авторитетным источником снапшотов
         private Guid _hostClientId = Guid.Empty;
 
-        public GameServer(ITransport transport, IGameSerializer serializer, IGameSerializer patchSerializer, IGameSerializer snapshotSerializer)
+        public GameServer(ITransport transport, IGameSerializer serializer)
         {
             _transport = transport;
             _serializer = serializer;
-            _patchSerializer = patchSerializer ?? throw new ArgumentNullException(nameof(patchSerializer));
-            _snapshotSerializer = snapshotSerializer ?? throw new ArgumentNullException(nameof(snapshotSerializer));
 
             _transport.Connected += OnClientConnected;
             _transport.Disconnected += OnClientDisconnected;
