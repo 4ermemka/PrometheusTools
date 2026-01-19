@@ -1,8 +1,6 @@
-﻿using Assets.Shared.ChangeDetector.Base.Mapping;
-using Assets.Shared.ChangeDetector.Collections;
+﻿using Assets.Shared.ChangeDetector.Collections;
 using Newtonsoft.Json;
 using System;
-using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
@@ -397,9 +395,12 @@ namespace Assets.Shared.ChangeDetector
             if (source == null)
                 throw new ArgumentNullException(nameof(source));
 
-            // Конвертируем source в DTO, затем применяем к target
-            var serializedData = source.GetSerializableData();
-            ApplySerializedData(serializedData);
+            if (source.GetType() != GetType())
+                throw new InvalidOperationException(
+                    $"ApplySnapshot type mismatch: source={source.GetType().Name}, target={GetType().Name}");
+
+            var path = new List<FieldPathSegment>();
+            ApplySnapshotRecursive(root: this, target: this, source: source, path);
             SnapshotApplied?.Invoke();
         }
 
@@ -619,120 +620,6 @@ namespace Assets.Shared.ChangeDetector
         {
             //Debug.Log($"[SyncNode {GetType().Name}] Change: {string.Join(".", change.Path)} = {change.NewValue}");
             base.RaiseChange(change);
-        }
-
-        public Dictionary<string, object?> GetSerializableData()
-        {
-            var result = new Dictionary<string, object?>();
-            var properties = GetPropertiesMetadataForType(GetType());
-
-            foreach (var metadata in properties)
-            {
-                var value = GetPropertyValueForSerialization(metadata);
-                result[metadata.Name] = SyncValueConverter.ToDtoIfNeeded(value);
-            }
-
-            return result;
-        }
-
-        private object? GetPropertyValueForSerialization(PropertyMetadata metadata)
-        {
-            var syncProperty = metadata.Getter(this);
-            if (syncProperty == null)
-                return null;
-
-            // Для SyncProperty<T> - возвращаем Value
-            if (metadata.SyncPropertyType.IsGenericType &&
-                metadata.SyncPropertyType.GetGenericTypeDefinition() == typeof(SyncProperty<>))
-            {
-                var valueProperty = metadata.SyncPropertyType.GetProperty("Value");
-                return valueProperty?.GetValue(syncProperty);
-            }
-            // Для SyncList<T> - сериализуем как массив
-            else if (syncProperty is IEnumerable enumerable)
-            {
-                var list = new List<object?>();
-                foreach (var item in enumerable)
-                {
-                    if (item is SyncNode node)
-                    {
-                        list.Add(node.GetSerializableData());
-                    }
-                    else
-                    {
-                        list.Add(SyncValueConverter.ToDtoIfNeeded(item));
-                    }
-                }
-                return list;
-            }
-            // Для вложенного SyncNode
-            else if (syncProperty is SyncNode node)
-            {
-                return node.GetSerializableData();
-            }
-
-            return syncProperty;
-        }
-
-        /// <summary>
-        /// Восстанавливает данные из сериализованного словаря
-        /// </summary>
-        public void ApplySerializedData(Dictionary<string, object?> data)
-        {
-            var properties = GetPropertiesMetadataForType(GetType());
-
-            foreach (var metadata in properties)
-            {
-                if (!data.TryGetValue(metadata.Name, out var serializedValue))
-                    continue;
-
-                ApplySerializedValue(metadata, serializedValue);
-            }
-        }
-
-        private void ApplySerializedValue(PropertyMetadata metadata, object? serializedValue)
-        {
-            var syncProperty = metadata.Getter(this);
-            if (syncProperty == null)
-                return;
-
-            object? value = SyncValueConverter.FromDtoIfNeeded(serializedValue);
-
-            // Для SyncProperty<T> - устанавливаем Value
-            if (metadata.SyncPropertyType.IsGenericType &&
-                metadata.SyncPropertyType.GetGenericTypeDefinition() == typeof(SyncProperty<>))
-            {
-                var valueProperty = metadata.SyncPropertyType.GetProperty("Value");
-                valueProperty?.SetValue(syncProperty, value);
-            }
-            // Для SyncList<T> - очищаем и добавляем элементы
-            else if (syncProperty is IList list && value is IEnumerable enumerable)
-            {
-                list.Clear();
-                foreach (var item in enumerable)
-                {
-                    if (item is Dictionary<string, object?> itemData)
-                    {
-                        // Создаем новый элемент и применяем данные
-                        var itemType = metadata.PropertyType.GetGenericArguments()[0];
-                        if (typeof(SyncNode).IsAssignableFrom(itemType))
-                        {
-                            var newItem = (SyncNode)Activator.CreateInstance(itemType);
-                            newItem.ApplySerializedData(itemData);
-                            list.Add(newItem);
-                        }
-                    }
-                    else
-                    {
-                        list.Add(item);
-                    }
-                }
-            }
-            // Для вложенного SyncNode
-            else if (syncProperty is SyncNode node && value is Dictionary<string, object?> nodeData)
-            {
-                node.ApplySerializedData(nodeData);
-            }
         }
     }
 }
