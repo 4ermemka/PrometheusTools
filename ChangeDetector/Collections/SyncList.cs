@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections;
 using System.Collections.Generic;
+using Newtonsoft.Json.Linq;
 
 namespace Assets.Shared.ChangeDetector.Collections
 {
@@ -187,21 +188,87 @@ namespace Assets.Shared.ChangeDetector.Collections
             if (!int.TryParse(segmentName, out var index))
                 throw new InvalidOperationException($"Invalid index segment '{segmentName}' for SyncList.");
 
-            var converted = (T?)value;
+            // Если value null - это запрос на удаление
+            if (value == null)
+            {
+                if (index >= 0 && index < _items.Count)
+                {
+                    RemoveAtSilent(index);
+                }
+                return;
+            }
+
+            // Преобразуем значение
+            T? convertedValue = ConvertPatchValue(value);
 
             if (index == _items.Count)
             {
-                // Добавление в конец
-                Add(converted!);
+                // Добавление в конец (тихий метод без генерации патча)
+                InsertSilent(index, convertedValue!);
             }
             else if (index >= 0 && index < _items.Count)
             {
-                // Замена существующего
-                this[index] = converted!;
+                if (convertedValue == null)
+                {
+                    // Удаление если не удалось преобразовать
+                    RemoveAtSilent(index);
+                }
+                else
+                {
+                    // Замена существующего (тихий метод без генерации патча)
+                    SetItemSilent(index, convertedValue);
+                }
             }
             else
             {
                 throw new IndexOutOfRangeException($"Index {index} is out of range [0, {_items.Count}].");
+            }
+        }
+
+        private T? ConvertPatchValue(object? value)
+        {
+            if (value == null) return default;
+
+            // Если value уже правильного типа
+            if (value is T typedValue)
+                return typedValue;
+
+            // Если это JObject, десериализуем в T
+            if (value is JObject jObject)
+            {
+                try
+                {
+                    return jObject.ToObject<T>();
+                }
+                catch (Exception ex)
+                {
+                    UnityEngine.Debug.LogError($"Failed to convert JObject to {typeof(T).Name}: {ex.Message}");
+                    return default;
+                }
+            }
+
+            // Если это JArray, десериализуем в T
+            if (value is JArray jArray)
+            {
+                try
+                {
+                    return jArray.ToObject<T>();
+                }
+                catch (Exception ex)
+                {
+                    UnityEngine.Debug.LogError($"Failed to convert JArray to {typeof(T).Name}: {ex.Message}");
+                    return default;
+                }
+            }
+
+            // Попробуем конвертировать
+            try
+            {
+                return (T)Convert.ChangeType(value, typeof(T));
+            }
+            catch
+            {
+                return default;
             }
         }
 
@@ -211,8 +278,52 @@ namespace Assets.Shared.ChangeDetector.Collections
 
         void ISnapshotCollection.ApplySnapshotFrom(object? sourceCollection)
         {
+            if (sourceCollection is null)
+            {
+                ClearSilent();
+                return;
+            }
+
             if (sourceCollection is not IEnumerable<T> source)
-                throw new InvalidOperationException($"Source must be IEnumerable<{typeof(T).Name}>.");
+            {
+                // Пытаемся преобразовать
+                if (sourceCollection is IEnumerable enumerable)
+                {
+                    var list = new List<T>();
+                    foreach (var item in enumerable)
+                    {
+                        if (item is T typedItem)
+                        {
+                            list.Add(typedItem);
+                        }
+                        else if (item != null)
+                        {
+                            try
+                            {
+                                var converted = ConvertPatchValue(item);
+                                if (converted != null)
+                                {
+                                    list.Add(converted);
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                throw new InvalidOperationException(
+                                    $"Cannot convert item of type {item.GetType().Name} to {typeof(T).Name}: {ex.Message}");
+                            }
+                        }
+                        else
+                        {
+                            list.Add(default!);
+                        }
+                    }
+                    source = list;
+                }
+                else
+                {
+                    throw new InvalidOperationException($"Source must be IEnumerable<{typeof(T).Name}> or IEnumerable.");
+                }
+            }
 
             // 1. Отписываемся от старых элементов
             foreach (var item in _items)
@@ -220,7 +331,7 @@ namespace Assets.Shared.ChangeDetector.Collections
                 UnwireChild(item);
             }
 
-            // 2. Полностью очищаем коллекцию
+            // 2. Полностью очищаем коллекцию (тихо)
             _items.Clear();
             _indexMap.Clear();
             _nodeHandlers.Clear();
@@ -231,7 +342,7 @@ namespace Assets.Shared.ChangeDetector.Collections
             {
                 _items.Add(item);
                 AddToIndexMap(item, index);
-                WireChild(item, index); // Подписываемся на новые элементы
+                WireChild(item, index);
                 index++;
             }
 
@@ -314,7 +425,29 @@ namespace Assets.Shared.ChangeDetector.Collections
 
         private void AddToIndexMap(T item, int index)
         {
-            if (!_indexMap.TryGetValue(item, out var indices))
+            // Защита от null для reference types
+            if (item == null && !typeof(T).IsValueType)
+            {
+                return;
+            }
+
+            // Используем EqualityComparer для безопасного сравнения
+            var comparer = EqualityComparer<T>.Default;
+
+            // Ищем существующие индексы для этого элемента
+            List<int> indices = null;
+            T? foundKey = default;
+            foreach (var kvp in _indexMap)
+            {
+                if (comparer.Equals(kvp.Key, item))
+                {
+                    foundKey = kvp.Key;
+                    indices = kvp.Value;
+                    break;
+                }
+            }
+
+            if (indices == null)
             {
                 indices = new List<int>();
                 _indexMap[item] = indices;
@@ -328,12 +461,33 @@ namespace Assets.Shared.ChangeDetector.Collections
 
         private void RemoveFromIndexMap(T item, int index)
         {
-            if (_indexMap.TryGetValue(item, out var indices))
+            // Защита от null для reference types
+            if (item == null && !typeof(T).IsValueType)
+            {
+                return;
+            }
+
+            var comparer = EqualityComparer<T>.Default;
+
+            // Ищем существующие индексы для этого элемента
+            T? foundKey = default;
+            List<int> indices = null;
+            foreach (var kvp in _indexMap)
+            {
+                if (comparer.Equals(kvp.Key, item))
+                {
+                    foundKey = kvp.Key;
+                    indices = kvp.Value;
+                    break;
+                }
+            }
+
+            if (indices != null && foundKey != null)
             {
                 indices.Remove(index);
                 if (indices.Count == 0)
                 {
-                    _indexMap.Remove(item);
+                    _indexMap.Remove(foundKey);
                 }
             }
         }
@@ -387,6 +541,88 @@ namespace Assets.Shared.ChangeDetector.Collections
 
         #endregion
 
+        #region Тихие методы (без генерации патчей)
+
+        private void InsertSilent(int index, T item)
+        {
+            if (index < 0 || index > _items.Count)
+                throw new IndexOutOfRangeException();
+
+            _items.Insert(index, item);
+
+            // Сдвигаем индексы для элементов после вставки
+            ShiftIndices(index, 1);
+            AddToIndexMap(item, index);
+
+            // Обновляем подписки
+            RenumberSubscriptionsFrom(index, 1);
+
+            WireChild(item, index);
+
+            // НЕ генерируем патч
+            // НЕ вызываем CollectionChanged
+        }
+
+        private void RemoveAtSilent(int index)
+        {
+            if (index < 0 || index >= _items.Count)
+                throw new IndexOutOfRangeException();
+
+            var item = _items[index];
+            _items.RemoveAt(index);
+
+            UnwireChild(item);
+            RemoveFromIndexMap(item, index);
+
+            // Сдвигаем индексы для элементов после удаления
+            ShiftIndices(index + 1, -1);
+
+            // Обновляем подписки
+            RenumberSubscriptionsFrom(index + 1, -1);
+
+            // НЕ генерируем патч
+            // НЕ вызываем CollectionChanged
+        }
+
+        private void SetItemSilent(int index, T value)
+        {
+            if (index < 0 || index >= _items.Count)
+                throw new IndexOutOfRangeException();
+
+            var oldItem = _items[index];
+            if (EqualityComparer<T>.Default.Equals(oldItem, value))
+                return;
+
+            // Обновляем индексный мап
+            RemoveFromIndexMap(oldItem, index);
+            AddToIndexMap(value, index);
+
+            // Отписываемся от старого элемента, подписываемся на новый
+            UnwireChild(oldItem);
+            _items[index] = value;
+            WireChild(value, index);
+
+            // НЕ генерируем патч
+            // НЕ вызываем CollectionChanged
+        }
+
+        private void ClearSilent()
+        {
+            foreach (var item in _items)
+            {
+                UnwireChild(item);
+            }
+
+            _items.Clear();
+            _indexMap.Clear();
+            _nodeHandlers.Clear();
+
+            // НЕ генерируем патч
+            // НЕ вызываем CollectionChanged
+        }
+
+        #endregion
+
         #region ApplyCollectionChange (для обратной совместимости)
 
         /// <summary>
@@ -432,46 +668,6 @@ namespace Assets.Shared.ChangeDetector.Collections
                         break;
                     }
             }
-        }
-
-        private void InsertSilent(int index, T item)
-        {
-            _items.Insert(index, item);
-            ShiftIndices(index, 1);
-            AddToIndexMap(item, index);
-            RenumberSubscriptionsFrom(index, 1);
-            WireChild(item, index);
-        }
-
-        private void RemoveAtSilent(int index)
-        {
-            var item = _items[index];
-            _items.RemoveAt(index);
-            UnwireChild(item);
-            RemoveFromIndexMap(item, index);
-            ShiftIndices(index + 1, -1);
-            RenumberSubscriptionsFrom(index + 1, -1);
-        }
-
-        private void SetItemSilent(int index, T value)
-        {
-            var oldItem = _items[index];
-            UnwireChild(oldItem);
-            _items[index] = value;
-            RemoveFromIndexMap(oldItem, index);
-            AddToIndexMap(value, index);
-            WireChild(value, index);
-        }
-
-        private void ClearSilent()
-        {
-            foreach (var item in _items)
-            {
-                UnwireChild(item);
-            }
-            _items.Clear();
-            _indexMap.Clear();
-            _nodeHandlers.Clear();
         }
 
         private void UpdateIndexMapAfterMove(int fromIndex, int toIndex)

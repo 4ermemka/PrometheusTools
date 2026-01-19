@@ -1,4 +1,5 @@
 ﻿using Assets.Shared.ChangeDetector.Collections;
+using Assets.Shared.ChangeDetector.Serialization;
 using Newtonsoft.Json;
 using System;
 using System.Collections.Concurrent;
@@ -319,10 +320,10 @@ namespace Assets.Shared.ChangeDetector
         }
 
         private void ApplyPatchIntoCollection(
-            ISyncIndexableCollection collection,
-            IReadOnlyList<FieldPathSegment> path,
-            int index,
-            object? newValue)
+    ISyncIndexableCollection collection,
+    IReadOnlyList<FieldPathSegment> path,
+    int index,
+    object? newValue)
         {
             if (index >= path.Count)
                 throw new InvalidOperationException("Path ended before collection element.");
@@ -332,7 +333,10 @@ namespace Assets.Shared.ChangeDetector
 
             if (isLeaf)
             {
-                collection.SetElement(segmentName, newValue);
+                // Преобразуем значение если нужно
+                var convertedValue = ConvertPatchValueForCollection(collection, newValue);
+
+                collection.SetElement(segmentName, convertedValue);
                 if (collection is SyncNode syncCollection)
                 {
                     syncCollection.Patched?.Invoke();
@@ -354,6 +358,21 @@ namespace Assets.Shared.ChangeDetector
             }
         }
 
+        private object? ConvertPatchValueForCollection(ISyncIndexableCollection collection, object? value)
+        {
+            // Для SyncList<T> пытаемся определить тип T
+            if (collection is SyncList<object> syncList)
+            {
+                var listType = syncList.GetType();
+                if (listType.IsGenericType)
+                {
+                    var elementType = listType.GetGenericArguments()[0];
+                    return JsonPatchHelper.ConvertPatchValue(value, elementType);
+                }
+            }
+
+            return value;
+        }
         /// <summary>
         /// Применяет полный снапшот
         /// </summary>
