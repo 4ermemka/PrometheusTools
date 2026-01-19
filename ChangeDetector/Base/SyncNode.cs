@@ -293,7 +293,9 @@ namespace Assets.Shared.ChangeDetector
                 var applyPatchMethod = metadata.SyncPropertyType.GetMethod("ApplyPatch");
                 if (applyPatchMethod == null) return;
 
-                applyPatchMethod.Invoke(syncProperty, new[] { newValue });
+                applyPatchMethod.Invoke(syncProperty, new[] {
+                    newValue is Newtonsoft.Json.Linq.JToken j ? j.ToObject(metadata.PropertyType) : newValue
+                });
             }
         }
 
