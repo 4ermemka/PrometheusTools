@@ -1,4 +1,5 @@
-﻿using Assets.Shared.ChangeDetector.Collections;
+﻿using Assets.Shared.ChangeDetector.Base.Mapping;
+using Assets.Shared.ChangeDetector.Collections;
 using Assets.Shared.ChangeDetector.Serialization;
 using Newtonsoft.Json;
 using System;
@@ -320,10 +321,10 @@ namespace Assets.Shared.ChangeDetector
         }
 
         private void ApplyPatchIntoCollection(
-    ISyncIndexableCollection collection,
-    IReadOnlyList<FieldPathSegment> path,
-    int index,
-    object? newValue)
+            ISyncIndexableCollection collection,
+            IReadOnlyList<FieldPathSegment> path,
+            int index,
+            object? newValue)
         {
             if (index >= path.Count)
                 throw new InvalidOperationException("Path ended before collection element.");
@@ -426,7 +427,166 @@ namespace Assets.Shared.ChangeDetector
                 }
             }
         }
+        /// <summary>
+        /// Получает данные для сериализации
+        /// </summary>
+        public Dictionary<string, object> GetSerializableData()
+        {
+            var result = new Dictionary<string, object>();
+            var properties = GetPropertiesMetadataForType(GetType());
 
+            foreach (var metadata in properties)
+            {
+                if (metadata.IgnoreInSnapshot) continue;
+
+                var value = GetPropertyValue(metadata, this);
+                result[metadata.Name] = ConvertValueForSerialization(value);
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Восстанавливает данные из словаря
+        /// </summary>
+        public void ApplySerializedData(Dictionary<string, object> data)
+        {
+            var properties = GetPropertiesMetadataForType(GetType());
+
+            foreach (var metadata in properties)
+            {
+                if (!data.TryGetValue(metadata.Name, out var value)) continue;
+
+                ApplySerializedValue(metadata, value);
+            }
+        }
+
+        private object ConvertValueForSerialization(object value)
+        {
+            if (value == null) return null;
+
+            if (value is ISyncSerializable serializable)
+            {
+                return serializable.GetSerializableData();
+            }
+
+            if (value is SyncNode node)
+            {
+                return node.GetSerializableData();
+            }
+
+            // Для обычных коллекций
+            if (value is System.Collections.IEnumerable enumerable && !(value is string))
+            {
+                var list = new List<object>();
+                foreach (var item in enumerable)
+                {
+                    list.Add(ConvertValueForSerialization(item));
+                }
+                return list;
+            }
+
+            return value;
+        }
+
+        private void ApplySerializedValue(PropertyMetadata metadata, object value)
+        {
+            var currentValue = metadata.Getter(this);
+
+            // 1. Для ISyncSerializable
+            if (currentValue is ISyncSerializable serializable)
+            {
+                serializable.ApplySerializedData(value);
+                return;
+            }
+
+            // 2. Для SyncNode
+            if (currentValue is SyncNode node && value is Dictionary<string, object> nodeData)
+            {
+                node.ApplySerializedData(nodeData);
+                return;
+            }
+
+            // 3. Для SyncProperty<T>
+            if (metadata.SyncPropertyType.IsGenericType &&
+                metadata.SyncPropertyType.GetGenericTypeDefinition() == typeof(SyncProperty<>))
+            {
+                var syncProp = metadata.Getter(this);
+                if (syncProp != null)
+                {
+                    var convertedValue = ConvertValueFromSerialization(value, metadata.PropertyType);
+                    var applySnapshotMethod = metadata.SyncPropertyType.GetMethod("ApplySnapshot");
+                    applySnapshotMethod?.Invoke(syncProp, new[] { convertedValue });
+                }
+                return;
+            }
+
+            // 4. Для обычных свойств
+            if (metadata.Setter != null)
+            {
+                var convertedValue = ConvertValueFromSerialization(value, metadata.PropertyType);
+                metadata.Setter(this, convertedValue);
+            }
+        }
+
+        private object ConvertValueFromSerialization(object serializedValue, Type targetType)
+        {
+            if (serializedValue == null) return null;
+
+            // Если уже правильный тип
+            if (targetType.IsInstanceOfType(serializedValue))
+                return serializedValue;
+
+            // Если targetType реализует ISyncSerializable
+            if (typeof(ISyncSerializable).IsAssignableFrom(targetType) &&
+                Activator.CreateInstance(targetType) is ISyncSerializable serializable)
+            {
+                serializable.ApplySerializedData(serializedValue);
+                return serializable;
+            }
+
+            // Если targetType - SyncNode и value - Dictionary
+            if (typeof(SyncNode).IsAssignableFrom(targetType) &&
+                serializedValue is Dictionary<string, object> dict)
+            {
+                var node = Activator.CreateInstance(targetType) as SyncNode;
+                if (node != null)
+                {
+                    node.ApplySerializedData(dict);
+                    return node;
+                }
+            }
+
+            // Для списков
+            if (serializedValue is System.Collections.IEnumerable enumerable &&
+                targetType.IsGenericType && targetType.GetGenericTypeDefinition() == typeof(List<>))
+            {
+                var elementType = targetType.GetGenericArguments()[0];
+                var listType = typeof(List<>).MakeGenericType(elementType);
+                var list = Activator.CreateInstance(listType) as System.Collections.IList;
+
+                if (list != null)
+                {
+                    foreach (var item in enumerable)
+                    {
+                        var convertedItem = ConvertValueFromSerialization(item, elementType);
+                        list.Add(convertedItem);
+                    }
+                    return list;
+                }
+            }
+
+            // Пробуем конвертировать
+            try
+            {
+                return Convert.ChangeType(serializedValue, targetType);
+            }
+            catch
+            {
+                return serializedValue;
+            }
+        }
+        
         private static object? GetPropertyValue(PropertyMetadata metadata, SyncNode instance)
         {
             var syncProperty = metadata.Getter(instance);
@@ -549,70 +709,5 @@ namespace Assets.Shared.ChangeDetector
             base.RaiseChange(change);
         }
 
-        /// <summary>
-        /// Получает данные для сериализации
-        /// </summary>
-        public Dictionary<string, object?> GetSerializableData()
-        {
-            var result = new Dictionary<string, object?>();
-            var properties = GetPropertiesMetadataForType(GetType());
-
-            foreach (var metadata in properties)
-            {
-                if (metadata.IgnoreInSnapshot) continue;
-
-                var value = GetPropertyValue(metadata, this);
-                result[metadata.Name] = value;
-            }
-
-            return result;
-        }
-
-        /// <summary>
-        /// Восстанавливает данные из словаря
-        /// </summary>
-        public void ApplySerializedData(Dictionary<string, object?> data)
-        {
-            var properties = GetPropertiesMetadataForType(GetType());
-
-            foreach (var metadata in properties)
-            {
-                if (!data.TryGetValue(metadata.Name, out var value)) continue;
-
-                ApplySerializedValue(metadata, value);
-            }
-        }
-
-        private void ApplySerializedValue(PropertyMetadata metadata, object? value)
-        {
-            var syncProperty = metadata.Getter(this);
-
-            if (metadata.SyncPropertyType.IsGenericType &&
-                metadata.SyncPropertyType.GetGenericTypeDefinition() == typeof(SyncProperty<>))
-            {
-                var syncProp = metadata.Getter(this);
-                if (syncProp != null)
-                {
-                    var applySnapshotMethod = metadata.SyncPropertyType.GetMethod("ApplySnapshot");
-                    applySnapshotMethod?.Invoke(syncProp, new[] { value });
-                }
-            }
-            else if (syncProperty is System.Collections.IList list && value is System.Collections.IEnumerable enumerable)
-            {
-                list.Clear();
-                foreach (var item in enumerable)
-                {
-                    list.Add(item);
-                }
-            }
-            else if (syncProperty is SyncNode node && value is Dictionary<string, object?> nodeData)
-            {
-                node.ApplySerializedData(nodeData);
-            }
-            else if (metadata.Setter != null)
-            {
-                metadata.Setter(this, value);
-            }
-        }
     }
 }

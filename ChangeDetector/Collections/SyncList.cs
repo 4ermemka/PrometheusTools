@@ -1,17 +1,15 @@
-﻿using System;
+﻿using Assets.Shared.ChangeDetector.Base.Mapping;
+using Newtonsoft.Json.Linq;
+using System;
 using System.Collections;
 using System.Collections.Generic;
-using Newtonsoft.Json.Linq;
 
 namespace Assets.Shared.ChangeDetector.Collections
 {
     /// <summary>
     /// Список с поддержкой трекинга, патчей и снапшотов.
     /// </summary>
-    public sealed class SyncList<T> : SyncNode,
-        IList<T>,
-        ISnapshotCollection,
-        ISyncIndexableCollection
+    public sealed class SyncList<T> : SyncNode, IList<T>, ISyncCollection, ISnapshotCollection, ISyncIndexableCollection
     {
         private readonly List<T> _items = new();
         private readonly Dictionary<T, List<int>> _indexMap = new();
@@ -23,7 +21,7 @@ namespace Assets.Shared.ChangeDetector.Collections
         public event Action<CollectionChange>? CollectionChanged;
 
         #region IList<T> Implementation
-
+        public Type ElementType => typeof(T);
         public T this[int index]
         {
             get => _items[index];
@@ -57,7 +55,54 @@ namespace Assets.Shared.ChangeDetector.Collections
                 ));
             }
         }
+        object ISyncSerializable.GetSerializableData()
+        {
+            return new List<T>(_items);
+        }
 
+        void ISyncSerializable.ApplySerializedData(object data)
+        {
+            if (data is IEnumerable<T> enumerable)
+            {
+                ApplySnapshotFromEnumerable(enumerable);
+            }
+            else if (data is IEnumerable enumerableRaw)
+            {
+                var list = new List<T>();
+                foreach (var item in enumerableRaw)
+                {
+                    if (item is T typedItem)
+                        list.Add(typedItem);
+                }
+                ApplySnapshotFromEnumerable(list);
+            }
+        }
+
+        private void ApplySnapshotFromEnumerable(IEnumerable<T> source)
+        {
+            // Отписываемся от старых элементов
+            foreach (var item in _items)
+            {
+                UnwireChild(item);
+            }
+
+            // Очищаем коллекцию
+            _items.Clear();
+            _indexMap.Clear();
+            _nodeHandlers.Clear();
+
+            // Добавляем новые элементы
+            int index = 0;
+            foreach (var item in source)
+            {
+                _items.Add(item);
+                AddToIndexMap(item, index);
+                WireChild(item, index);
+                index++;
+            }
+
+            SnapshotApplied?.Invoke();
+        }
         public int Count => _items.Count;
         public bool IsReadOnly => false;
 
@@ -796,17 +841,5 @@ namespace Assets.Shared.ChangeDetector.Collections
             Value = value;
             OldValue = oldValue;
         }
-    }
-
-    /// <summary>
-    /// Тип операции в коллекции
-    /// </summary>
-    public enum CollectionOpKind
-    {
-        Add,
-        Remove,
-        Replace,
-        Clear,
-        Move
     }
 }

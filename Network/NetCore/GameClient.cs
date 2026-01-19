@@ -26,7 +26,6 @@ namespace Assets.Scripts.Network.NetCore
     {
         private readonly ITransport _transport;
         private readonly SyncNode _worldState;          // WorldData : SyncNode
-        private readonly IGameSerializer _serializer;
 
         // Очередь входящих патчей, применяемых на главном потоке.
         private readonly ConcurrentQueue<PatchMessage> _incomingPatches = new();
@@ -37,11 +36,10 @@ namespace Assets.Scripts.Network.NetCore
         public event Action ConnectedToHost;
         public event Action DisconnectedFromHost;
 
-        public GameClient(ITransport transport, SyncNode worldState, IGameSerializer serializer)
+        public GameClient(ITransport transport, SyncNode worldState)
         {
             _transport = transport ?? throw new ArgumentNullException(nameof(transport));
             _worldState = worldState ?? throw new ArgumentNullException(nameof(worldState));
-            _serializer = serializer ?? throw new ArgumentNullException(nameof(serializer));
 
             _transport.Connected += OnConnected;
             _transport.Disconnected += OnDisconnected;
@@ -120,7 +118,7 @@ namespace Assets.Scripts.Network.NetCore
             {
                 case MessageType.SnapshotRequest:
                     {
-                        var request = _serializer.Deserialize<SnapshotRequestMessage>(payload);
+                        var request = JsonGameSerializer.Deserialize<SnapshotRequestMessage>(payload);
                         if (request == null) return;
 
                         // Важно: этот case должен быть активен только на хост-клиенте.
@@ -130,7 +128,7 @@ namespace Assets.Scripts.Network.NetCore
 
                 case MessageType.Snapshot:
                     {
-                        var snapshot = _serializer.Deserialize<SnapshotMessage>(payload);
+                        var snapshot = JsonGameSerializer.Deserialize<SnapshotMessage>(payload);
                         if (snapshot == null) return;
 
                         _mainThreadActions.Enqueue(() => ApplySnapshot(snapshot));
@@ -139,7 +137,7 @@ namespace Assets.Scripts.Network.NetCore
 
                 case MessageType.Patch:
                     {
-                        var patch = _serializer.Deserialize<PatchMessage>(payload);
+                        var patch = JsonGameSerializer.Deserialize<PatchMessage>(payload);
                         if (patch == null) return;
 
                         _incomingPatches.Enqueue(patch);
@@ -153,7 +151,7 @@ namespace Assets.Scripts.Network.NetCore
             try
             {
                 // request.RequestorClientId – тот, кому сервер потом перешлёт Snapshot.
-                var worldBytes = _serializer.Serialize(_worldState); // _worldState : WorldData : SyncNode
+                var worldBytes = SimpleSnapshotSerializer.Serialize(_worldState); // _worldState : WorldData : SyncNode
 
                 var snapshot = new SnapshotMessage
                 {
@@ -206,21 +204,10 @@ namespace Assets.Scripts.Network.NetCore
         /// </summary>
         private void ApplySnapshot(SnapshotMessage snapshot)
         {
-            var newWorldData = _serializer.Deserialize<WorldData>(snapshot.WorldDataPayload);
-            if (newWorldData == null)
-            {
-                Debug.LogWarning("[CLIENT] ApplySnapshot: deserialized WorldData is null.");
-                return;
-            }
-
-            if (_worldState is not WorldData currentWorld)
-            {
-                Debug.LogWarning("[CLIENT] ApplySnapshot: _worldState is not WorldData.");
-                return;
-            }
+            SimpleSnapshotSerializer.Deserialize(_worldState, snapshot.WorldDataPayload);
 
             //Debug.Log($"[CLIENT] ApplySnapshot: {JsonConvert.SerializeObject(newWorldData)}.");
-            currentWorld.ApplySnapshot(newWorldData);
+            //currentWorld.ApplySnapshot(newWorldData);
             Debug.Log("[CLIENT] Snapshot applied.");
         }
 
@@ -232,7 +219,7 @@ namespace Assets.Scripts.Network.NetCore
         {
             Debug.Log($"[CLIENT] OnLocalWorldChanged: path={string.Join(".", change.Path.Select(p => p.Name))}");
 
-            if (_serializer == null || _transport == null)
+            if (_transport == null)
                 return;
 
             var path = new List<FieldPathSegment>(change.Path);
@@ -268,7 +255,7 @@ namespace Assets.Scripts.Network.NetCore
 
         private ArraySegment<byte> MakePacket<T>(MessageType type, T message)
         {
-            var payload = _serializer.Serialize(message);
+            var payload = JsonGameSerializer.Serialize(message);
             var result = new byte[1 + 4 + payload.Length];
             result[0] = (byte)type;
             var len = payload.Length;

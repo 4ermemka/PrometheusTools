@@ -20,7 +20,6 @@ namespace Assets.Scripts.Network.NetCore
     public sealed class GameServer : IDisposable
     {
         private readonly ITransport _transport;
-        private readonly IGameSerializer _serializer;
 
         // Простейшее хранение подключённых клиентов
         private readonly HashSet<Guid> _clients = new HashSet<Guid>();
@@ -28,10 +27,9 @@ namespace Assets.Scripts.Network.NetCore
         // Первый подключившийся клиент считаем авторитетным источником снапшотов
         private Guid _hostClientId = Guid.Empty;
 
-        public GameServer(ITransport transport, IGameSerializer serializer)
+        public GameServer(ITransport transport)
         {
             _transport = transport;
-            _serializer = serializer;
 
             _transport.Connected += OnClientConnected;
             _transport.Disconnected += OnClientDisconnected;
@@ -56,7 +54,7 @@ namespace Assets.Scripts.Network.NetCore
 
             var isHost = clientId == _hostClientId;
             var handshake = new HandshakeMessage { IsHost = isHost };
-            var payload = _serializer.Serialize(handshake);
+            var payload = JsonGameSerializer.Serialize(handshake);
             var packet = MakePacket(MessageType.Handshake, payload);
 
             await _transport.SendAsync(clientId, packet, CancellationToken.None);
@@ -85,12 +83,12 @@ namespace Assets.Scripts.Network.NetCore
             {
                 case MessageType.SnapshotRequest:
                     {
-                        var request = _serializer.Deserialize<SnapshotRequestMessage>(payload);
+                        var request = JsonGameSerializer.Deserialize<SnapshotRequestMessage>(payload);
                         if (request == null) return;
 
                         request.RequestorClientId = clientId;
 
-                        var fwdPayload = _serializer.Serialize(request);
+                        var fwdPayload = JsonGameSerializer.Serialize(request);
                         var packet = MakePacket(MessageType.SnapshotRequest, fwdPayload);
 
                         if (_hostClientId != Guid.Empty && _clients.Contains(_hostClientId))
@@ -101,7 +99,7 @@ namespace Assets.Scripts.Network.NetCore
 
                 case MessageType.Snapshot:
                     {
-                        var snapshot = _serializer.Deserialize<SnapshotMessage>(payload);
+                        var snapshot = JsonGameSerializer.Deserialize<SnapshotMessage>(payload);
                         if (snapshot == null) return;
 
                         var targetId = snapshot.TargetClientId;
