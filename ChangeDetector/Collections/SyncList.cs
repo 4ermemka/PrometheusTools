@@ -171,14 +171,11 @@ namespace Assets.Shared.ChangeDetector.Collections
 
         #region ISyncIndexableCollection Implementation
 
-        int ISyncIndexableCollection.Count => _items.Count;
-
         object? ISyncIndexableCollection.GetElement(string segmentName)
         {
-            if (!PathHelper.IsCollectionIndex(segmentName))
+            if (!int.TryParse(segmentName, out var index))
                 throw new InvalidOperationException($"Invalid index segment '{segmentName}' for SyncList.");
 
-            var index = PathHelper.ParseListIndex(segmentName);
             if (index < 0 || index >= _items.Count)
                 throw new IndexOutOfRangeException($"Index {index} is out of range [0, {_items.Count}).");
 
@@ -187,11 +184,10 @@ namespace Assets.Shared.ChangeDetector.Collections
 
         void ISyncIndexableCollection.SetElement(string segmentName, object? value)
         {
-            if (!PathHelper.IsCollectionIndex(segmentName))
+            if (!int.TryParse(segmentName, out var index))
                 throw new InvalidOperationException($"Invalid index segment '{segmentName}' for SyncList.");
 
-            var index = PathHelper.ParseListIndex(segmentName);
-            var converted = (T?)ConvertIfNeeded(value, typeof(T));
+            var converted = (T?)value;
 
             if (index == _items.Count)
             {
@@ -261,7 +257,7 @@ namespace Assets.Shared.ChangeDetector.Collections
                     // Строим полный путь: [index] + внутренний путь
                     var path = new List<FieldPathSegment>
                     {
-                        new FieldPathSegment($"[{index}]")
+                        new FieldPathSegment(index.ToString())
                     };
                     path.AddRange(change.Path);
 
@@ -299,7 +295,7 @@ namespace Assets.Shared.ChangeDetector.Collections
                     {
                         var path = new List<FieldPathSegment>
                         {
-                            new FieldPathSegment($"[{currentIndex}]")
+                            new FieldPathSegment(currentIndex.ToString())
                         };
                         path.AddRange(change.Path);
 
@@ -362,19 +358,19 @@ namespace Assets.Shared.ChangeDetector.Collections
 
         private void GenerateAddPatch(int index, T item)
         {
-            var path = new List<FieldPathSegment> { new FieldPathSegment($"[{index}]") };
+            var path = new List<FieldPathSegment> { new FieldPathSegment(index.ToString()) };
             RaiseChange(new FieldChange(path, null, item));
         }
 
         private void GenerateRemovePatch(int index, T item)
         {
-            var path = new List<FieldPathSegment> { new FieldPathSegment($"[{index}]") };
+            var path = new List<FieldPathSegment> { new FieldPathSegment(index.ToString()) };
             RaiseChange(new FieldChange(path, item, null));
         }
 
         private void GenerateReplacePatch(int index, T oldItem, T newItem)
         {
-            var path = new List<FieldPathSegment> { new FieldPathSegment($"[{index}]") };
+            var path = new List<FieldPathSegment> { new FieldPathSegment(index.ToString()) };
             RaiseChange(new FieldChange(path, oldItem, newItem));
         }
 
@@ -391,21 +387,6 @@ namespace Assets.Shared.ChangeDetector.Collections
 
         #endregion
 
-        #region Helper Methods
-
-        private object? ConvertIfNeeded(object? value, Type targetType)
-        {
-            if (value == null)
-                return targetType.IsValueType ? Activator.CreateInstance(targetType) : null;
-
-            if (targetType.IsInstanceOfType(value))
-                return value;
-
-            return Convert.ChangeType(value, targetType);
-        }
-
-        #endregion
-
         #region ApplyCollectionChange (для обратной совместимости)
 
         /// <summary>
@@ -418,7 +399,7 @@ namespace Assets.Shared.ChangeDetector.Collections
                 case CollectionOpKind.Add:
                     {
                         var index = Convert.ToInt32(change.KeyOrIndex);
-                        var value = (T)ConvertIfNeeded(change.Value, typeof(T))!;
+                        var value = (T)change.Value!;
                         InsertSilent(index, value);
                         break;
                     }
@@ -431,7 +412,7 @@ namespace Assets.Shared.ChangeDetector.Collections
                 case CollectionOpKind.Replace:
                     {
                         var index = Convert.ToInt32(change.KeyOrIndex);
-                        var value = (T)ConvertIfNeeded(change.Value, typeof(T))!;
+                        var value = (T)change.Value!;
                         SetItemSilent(index, value);
                         break;
                     }
@@ -548,7 +529,7 @@ namespace Assets.Shared.ChangeDetector.Collections
                     {
                         var path = new List<FieldPathSegment>
                         {
-                            new FieldPathSegment($"[{currentIndex}]")
+                            new FieldPathSegment(currentIndex.ToString())
                         };
                         path.AddRange(change.Path);
 
@@ -562,5 +543,74 @@ namespace Assets.Shared.ChangeDetector.Collections
         }
 
         #endregion
+
+        #region Serialization Support
+
+        /// <summary>
+        /// Получает данные для сериализации (просто список элементов)
+        /// </summary>
+        public new List<T> GetSerializableData()
+        {
+            return new List<T>(_items);
+        }
+
+        /// <summary>
+        /// Восстанавливает данные из сериализованного списка
+        /// </summary>
+        public void ApplySerializedData(List<T> data)
+        {
+            // Отписываемся от старых элементов
+            foreach (var item in _items)
+            {
+                UnwireChild(item);
+            }
+
+            // Очищаем и заполняем новыми элементами
+            _items.Clear();
+            _indexMap.Clear();
+            _nodeHandlers.Clear();
+
+            for (int i = 0; i < data.Count; i++)
+            {
+                _items.Add(data[i]);
+                AddToIndexMap(data[i], i);
+                WireChild(data[i], i);
+            }
+
+            SnapshotApplied?.Invoke();
+        }
+
+        #endregion
+    }
+
+    /// <summary>
+    /// Изменение в коллекции
+    /// </summary>
+    public class CollectionChange
+    {
+        public CollectionOpKind Kind { get; }
+        public object? KeyOrIndex { get; }
+        public object? Value { get; }
+        public object? OldValue { get; }
+
+        public CollectionChange(CollectionOpKind kind, object? keyOrIndex, object? value, object? oldValue = null)
+        {
+            Kind = kind;
+            KeyOrIndex = keyOrIndex;
+            Value = value;
+            OldValue = oldValue;
+        }
+    }
+
+    /// <summary>
+    /// Тип операции в коллекции
+    /// </summary>
+    public enum CollectionOpKind
+    {
+        Add,
+        Remove,
+        Replace,
+        Clear,
+        Move
     }
 }

@@ -2,13 +2,12 @@
 {
     public interface ISnapshotCollection
     {
-        void ApplySnapshotFrom(object? sourceCollection);
+        void ApplySnapshotFrom(object? sourceValue);
     }
 
     public interface ISyncIndexableCollection
     {
-        int Count { get; }
-        object? GetElement(string segmentName);
-        void SetElement(string segmentName, object? value);
+        object? GetElement(string index);
+        void SetElement(string index, object? value);
     }
 }

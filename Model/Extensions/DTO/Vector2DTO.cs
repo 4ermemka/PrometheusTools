@@ -4,9 +4,7 @@ using System;
 [Serializable]
 public class Vector2Dto
 {
-    [JsonProperty("x")]
     public float x { get; set; }
-    [JsonProperty("y")]
     public float y { get; set; }
 
     public static Vector2Dto Zero()

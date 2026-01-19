@@ -1,11 +1,8 @@
 ﻿using System;
-using UnityEngine;
+using System.Collections.Generic;
 
 namespace Assets.Shared.ChangeDetector
 {
-    /// <summary>
-    /// Обертка для синхронизируемого свойства с разделением входящих/исходящих изменений.
-    /// </summary>
     public class SyncProperty<T> : IEquatable<SyncProperty<T>>
     {
         private T _value;
@@ -22,13 +19,12 @@ namespace Assets.Shared.ChangeDetector
             get => _value;
             set
             {
-                if (System.Collections.Generic.EqualityComparer<T>.Default.Equals(_value, value))
+                if (EqualityComparer<T>.Default.Equals(_value, value))
                     return;
 
                 var oldValue = _value;
                 _value = value;
 
-                // Генерируем патч для сети
                 if (_trackChanges && _owner != null)
                 {
                     _owner.RaisePropertyChange(_propertyName, oldValue, value);
@@ -52,15 +48,11 @@ namespace Assets.Shared.ChangeDetector
             _receivePatches = receivePatches;
         }
 
-        /// <summary>
-        /// Применить патч из сети (без генерации исходящего патча).
-        /// </summary>
         public void ApplyPatch(T newValue)
         {
-            if (!_receivePatches)
-                return;
+            if (!_receivePatches) return;
 
-            if (System.Collections.Generic.EqualityComparer<T>.Default.Equals(_value, newValue))
+            if (EqualityComparer<T>.Default.Equals(_value, newValue))
                 return;
 
             _value = newValue;
@@ -68,14 +60,8 @@ namespace Assets.Shared.ChangeDetector
             ValueChanged?.Invoke(newValue);
         }
 
-        /// <summary>
-        /// Получить значение для снапшота.
-        /// </summary>
         public T GetSnapshotValue() => _value;
 
-        /// <summary>
-        /// Применить значение из снапшота.
-        /// </summary>
         public void ApplySnapshot(T snapshotValue) => _value = snapshotValue;
 
         public static implicit operator T(SyncProperty<T> property) => property.Value;
@@ -84,7 +70,7 @@ namespace Assets.Shared.ChangeDetector
             obj is SyncProperty<T> other && Equals(other);
 
         public bool Equals(SyncProperty<T> other) =>
-            other != null && System.Collections.Generic.EqualityComparer<T>.Default.Equals(_value, other._value);
+            other != null && EqualityComparer<T>.Default.Equals(_value, other._value);
 
         public override int GetHashCode() => _value?.GetHashCode() ?? 0;
 
