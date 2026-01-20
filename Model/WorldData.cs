@@ -6,23 +6,16 @@ namespace Assets.Shared.Model
     public class WorldState : TrackableNode
     {
         [SerializeField]
-        public PlayerData PlayerData = new();
+        public BoxData BoxData = new();
     }
 
-    public class PlayerData : TrackableNode
+    public class BoxData : TrackableNode
     {
-        public Sync<int> Health = new Sync<int>();
-        public Sync<int> Score = new Sync<int>();
-        public Sync<string> Name = new Sync<string>();
         public Sync<Vector2Dto> Position = new Sync<Vector2Dto>();
 
-        public PlayerData()
+        public BoxData()
         {
-            // Можно добавить дополнительную инициализацию
-            Health.Value = 100;
-            Score.Value = 100;
-            Name.Value = "Player";
-            Position.Value = Vector2Dto.One();
+            Position.Value = Vector2Dto.Zero();
         }
     }
 }
