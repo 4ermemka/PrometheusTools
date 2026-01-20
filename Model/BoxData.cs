@@ -13,6 +13,13 @@ namespace Assets.Shared.Model
         public SyncProperty<Vector2Dto> Position { get; set; } = null!;
 
         // Конструктор для инициализации
+        public BoxData()
+        {
+            // Автоматически инициализируется через SyncField,
+            // но можно установить начальное значение:
+            Position.Value = Vector2.one.FromVector2();
+        }
+        // Конструктор для инициализации
         public BoxData(Vector2 position)
         {
             // Автоматически инициализируется через SyncField,
