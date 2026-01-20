@@ -151,7 +151,7 @@ namespace Assets.Scripts.Network.NetCore
             try
             {
                 // request.RequestorClientId – тот, кому сервер потом перешлёт Snapshot.
-                var worldBytes = SimpleSnapshotSerializer.Serialize(_worldState); // _worldState : WorldData : SyncNode
+                var worldBytes = JsonGameSerializer.Serialize(_worldState); // _worldState : WorldData : SyncNode
 
                 var snapshot = new SnapshotMessage
                 {
@@ -204,10 +204,10 @@ namespace Assets.Scripts.Network.NetCore
         /// </summary>
         private void ApplySnapshot(SnapshotMessage snapshot)
         {
-            SimpleSnapshotSerializer.Deserialize(_worldState, snapshot.WorldDataPayload);
+            var newWorldData = JsonGameSerializer.Deserialize<WorldData>(snapshot.WorldDataPayload);
 
             //Debug.Log($"[CLIENT] ApplySnapshot: {JsonConvert.SerializeObject(newWorldData)}.");
-            //currentWorld.ApplySnapshot(newWorldData);
+            _worldState.ApplySnapshot(newWorldData);
             Debug.Log("[CLIENT] Snapshot applied.");
         }
 

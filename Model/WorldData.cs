@@ -1,5 +1,4 @@
 ﻿using Assets.Shared.ChangeDetector;
-using Assets.Shared.ChangeDetector.Collections;
 using System;
 
 namespace Assets.Shared.Model
@@ -8,6 +7,6 @@ namespace Assets.Shared.Model
     public class WorldData : SyncNode
     {
         [SyncField]
-        public SyncList<BoxData> Boxes { get; private set; } = new();
+        public BoxData Box { get; set; }
     }
 }

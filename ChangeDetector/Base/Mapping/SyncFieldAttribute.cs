@@ -2,10 +2,6 @@
 
 namespace Assets.Shared.ChangeDetector
 {
-    /// <summary>
-    /// Атрибут для автоматической регистрации SyncProperty и коллекций.
-    /// </summary>
-
     [AttributeUsage(AttributeTargets.Property)]
     public class SyncFieldAttribute : Attribute
     {

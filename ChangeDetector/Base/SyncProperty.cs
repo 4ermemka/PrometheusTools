@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 namespace Assets.Shared.ChangeDetector
 {
-    public class SyncProperty<T> : IEquatable<SyncProperty<T>>
+    public class SyncProperty<T>
     {
         private T _value;
         private readonly string _propertyName;
@@ -11,8 +11,8 @@ namespace Assets.Shared.ChangeDetector
         private readonly bool _trackChanges;
         private readonly bool _receivePatches;
 
-        public event Action<T>? ValueChanged;
-        public event Action<T>? Patched;
+        public event Action<T> ValueChanged;
+        public event Action<T> Patched;
 
         public T Value
         {
@@ -37,7 +37,7 @@ namespace Assets.Shared.ChangeDetector
         public SyncProperty(
             SyncNode owner,
             string propertyName,
-            T defaultValue = default!,
+            T defaultValue = default,
             bool trackChanges = true,
             bool receivePatches = true)
         {
@@ -60,20 +60,10 @@ namespace Assets.Shared.ChangeDetector
             ValueChanged?.Invoke(newValue);
         }
 
-        public T GetSnapshotValue() => _value;
-
-        public void ApplySnapshot(T snapshotValue) => _value = snapshotValue;
-
-        public static implicit operator T(SyncProperty<T> property) => property.Value;
-
-        public override bool Equals(object obj) =>
-            obj is SyncProperty<T> other && Equals(other);
-
-        public bool Equals(SyncProperty<T> other) =>
-            other != null && EqualityComparer<T>.Default.Equals(_value, other._value);
-
-        public override int GetHashCode() => _value?.GetHashCode() ?? 0;
-
-        public override string ToString() => _value?.ToString() ?? "null";
+        public void ApplySnapshot(T snapshotValue)
+        {
+            _value = snapshotValue;
+            // НЕ вызываем события при снапшоте
+        }
     }
 }

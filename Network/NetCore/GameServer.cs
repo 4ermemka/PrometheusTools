@@ -1,6 +1,4 @@
 ﻿using Assets.Scripts.Network.NetTCP;
-using Assets.Shared.ChangeDetector;
-using Assets.Shared.ChangeDetector.Base.Mapping;
 using Assets.Shared.Network.NetCore;
 using Assets.Shared.Network.NetCore.Messages;
 using System;

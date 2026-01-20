@@ -13,7 +13,5 @@ namespace Assets.Shared.ChangeDetector
         {
             Name = name;
         }
-
-        public override string ToString() => Name;
     }
 }
