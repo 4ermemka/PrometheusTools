@@ -1,10 +1,6 @@
-﻿using Assets.Shared.ChangeDetector;
-using Assets.Shared.ChangeDetector.Base;
-using Assets.Shared.ChangeDetector.Base.Mapping;
-using Assets.Shared.Model;
+﻿using Assets.Shared.Model;
 using Assets.Shared.Network.NetCore;
-using Assets.Shared.Network.NetCore.Messages;
-using Newtonsoft.Json;
+using Assets.Shared.SyncSystem.Core;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -17,15 +13,15 @@ namespace Assets.Scripts.Network.NetCore
 {
     /// <summary>
     /// Клиент, который:
-    /// - держит ссылку на общий WorldData (модель мира),
+    /// - держит ссылку на общий WorldState (TrackableNode),
     /// - слушает локальные изменения (Changed) и шлёт патчи на сервер,
-    /// - принимает патчи/снапшоты с сервера и применяет их к WorldData.
-    /// WorldData сам по себе ничего не знает о сети и визуале.
+    /// - принимает патчи/снапшоты с сервера и применяет их к WorldState.
+    /// WorldState сам по себе ничего не знает о сети и визуале.
     /// </summary>
     public sealed class GameClient : IDisposable
     {
         private readonly ITransport _transport;
-        private readonly SyncNode _worldState;          // WorldData : SyncNode
+        private readonly WorldState _worldState;          // WorldState : TrackableNode
 
         // Очередь входящих патчей, применяемых на главном потоке.
         private readonly ConcurrentQueue<PatchMessage> _incomingPatches = new();
@@ -36,7 +32,7 @@ namespace Assets.Scripts.Network.NetCore
         public event Action ConnectedToHost;
         public event Action DisconnectedFromHost;
 
-        public GameClient(ITransport transport, SyncNode worldState)
+        public GameClient(ITransport transport, WorldState worldState)
         {
             _transport = transport ?? throw new ArgumentNullException(nameof(transport));
             _worldState = worldState ?? throw new ArgumentNullException(nameof(worldState));
@@ -45,7 +41,7 @@ namespace Assets.Scripts.Network.NetCore
             _transport.Disconnected += OnDisconnected;
             _transport.DataReceived += OnDataReceived;
 
-            // Локальные изменения WorldData → патчи на сервер
+            // Локальные изменения WorldState → патчи на сервер
             _worldState.Changed += OnLocalWorldChanged;
         }
 
@@ -56,7 +52,6 @@ namespace Assets.Scripts.Network.NetCore
         public async Task ConnectAsync(string address, int port, CancellationToken ct)
         {
             await _transport.StartAsync(address, port, ct);
-            // Никаких SnapshotRequest отсюда не шлём.
         }
 
         public async Task RequestSnapshotAsync()
@@ -150,8 +145,14 @@ namespace Assets.Scripts.Network.NetCore
         {
             try
             {
-                // request.RequestorClientId – тот, кому сервер потом перешлёт Snapshot.
-                var worldBytes = JsonGameSerializer.Serialize(_worldState); // _worldState : WorldData : SyncNode
+                // Получаем снапшот текущего состояния в виде Dictionary<string, object>
+                var snapshotDict = _worldState.CreateSnapshot();
+
+                // Создаем временный WorldState для сериализации
+                var tempWorldState = new WorldState();
+                tempWorldState.ApplySnapshot(snapshotDict);
+
+                var worldBytes = JsonGameSerializer.Serialize(tempWorldState);
 
                 var snapshot = new SnapshotMessage
                 {
@@ -161,7 +162,7 @@ namespace Assets.Scripts.Network.NetCore
 
                 var packet = MakePacket(MessageType.Snapshot, snapshot);
 
-                // Отправляем снапшот на сервер, он по TargetClientId доставит его нужному клиенту.
+                // Отправляем снапшот на сервер
                 await _transport.SendAsync(Guid.Empty, packet, CancellationToken.None);
 
                 Debug.Log($"[CLIENT-HOST] Snapshot sent to {request.RequestorClientId}");
@@ -178,14 +179,18 @@ namespace Assets.Scripts.Network.NetCore
         /// </summary>
         public void Update()
         {
-            // 1. Применяем входящие патчи (Position и любые другие поля WorldData)
+            // 1. Применяем входящие патчи
             while (_incomingPatches.TryDequeue(out var patch))
             {
-                Debug.Log($"[GameClient] Applying patch: {string.Join(".", patch.Path.Select(p => p.Name))} -> {patch.NewValue}");
+                if (patch == null) continue;
+
+                Debug.Log($"[GameClient] Applying patch: {patch.Path}: {patch.OldValue} -> {patch.NewValue}");
+
+                // Используем новый метод ApplyPatch с путем и значением
                 _worldState.ApplyPatch(patch.Path, patch.NewValue);
             }
 
-            // 2. Выполняем отложенные действия (например, применение снапшота)
+            // 2. Выполняем отложенные действия
             while (_mainThreadActions.TryDequeue(out var action))
             {
                 try
@@ -200,56 +205,61 @@ namespace Assets.Scripts.Network.NetCore
         }
 
         /// <summary>
-        /// Применение снапшота: полная синхронизация WorldData с авторитетной версией.
+        /// Применение снапшота: полная синхронизация WorldState с авторитетной версией.
+        /// Теперь WorldState использует Dictionary<string, object> для снапшотов.
         /// </summary>
         private void ApplySnapshot(SnapshotMessage snapshot)
         {
-            var newWorldData = JsonGameSerializer.Deserialize<WorldData>(snapshot.WorldDataPayload);
-
-            //Debug.Log($"[CLIENT] ApplySnapshot: {JsonConvert.SerializeObject(newWorldData)}.");
-            _worldState.ApplySnapshot(newWorldData);
-            Debug.Log("[CLIENT] Snapshot applied.");
-        }
-
-
-        /// <summary>
-        /// Локальное изменение модели (WorldData/BoxData) → отправка патча на сервер.
-        /// </summary>
-        private async void OnLocalWorldChanged(FieldChange change)
-        {
-            Debug.Log($"[CLIENT] OnLocalWorldChanged: path={string.Join(".", change.Path.Select(p => p.Name))}");
-
-            if (_transport == null)
-                return;
-
-            var path = new List<FieldPathSegment>(change.Path);
-
-            var patch = new PatchMessage
-            {
-                Path = path,
-                NewValue = change.NewValue
-            };
-
-            Debug.Log($"[CLIENT] MakePacket patch to send: {string.Join(".", patch.Path.Select(p => p.Name))}: {patch.NewValue}");
-
-            ArraySegment<byte> packet;
             try
             {
-                packet = MakePacket(MessageType.Patch, patch);
+                // Десериализуем WorldState из сообщения
+                var newWorldState = JsonGameSerializer.Deserialize<WorldState>(snapshot.WorldDataPayload);
+                if (newWorldState == null)
+                {
+                    Debug.LogError("[CLIENT] Failed to deserialize snapshot");
+                    return;
+                }
+
+                // Получаем словарь из десериализованного состояния
+                var snapshotDict = newWorldState.CreateSnapshot();
+
+                // Применяем словарь к текущему состоянию
+                _worldState.ApplySnapshot(snapshotDict);
+
+                Debug.Log("[CLIENT] Snapshot applied successfully.");
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[CLIENT] MakePacket failed: {ex}");
-                return;
+                Debug.LogError($"[CLIENT] ApplySnapshot failed: {ex}");
             }
+        }
+
+        /// <summary>
+        /// Локальное изменение WorldState → отправка патча на сервер.
+        /// WorldState теперь использует string path, object oldValue, object newValue.
+        /// </summary>
+        private async void OnLocalWorldChanged(string path, object oldValue, object newValue)
+        {
+            if (_transport == null)
+                return;
 
             try
             {
+                var patch = new PatchMessage
+                {
+                    Path = path,
+                    OldValue = oldValue,
+                    NewValue = newValue
+                };
+
+                Debug.Log($"[CLIENT] Sending patch: {path}: {oldValue} -> {newValue}");
+
+                var packet = MakePacket(MessageType.Patch, patch);
                 await _transport.SendAsync(Guid.Empty, packet, CancellationToken.None);
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[CLIENT] SendAsync failed: {ex}");
+                Debug.LogError($"[CLIENT] Failed to send patch: {ex}");
             }
         }
 

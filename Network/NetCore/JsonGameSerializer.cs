@@ -11,8 +11,23 @@ namespace Assets.Scripts.Network.NetCore
     {
         private static readonly JsonSerializerSettings Settings = new JsonSerializerSettings
         {
+            // Игнорировать циклические ссылки
             ReferenceLoopHandling = ReferenceLoopHandling.Ignore,
-            TypeNameHandling = TypeNameHandling.None
+            
+            // Не сериализовать null значения
+            NullValueHandling = NullValueHandling.Ignore,
+            
+            // Форматирование для отладки
+            Formatting = Formatting.Indented,
+            
+            // Сериализация типов
+            TypeNameHandling = TypeNameHandling.Auto,
+            
+            // Игнорировать поля/свойства с атрибутом [JsonIgnore]
+            ContractResolver = new Newtonsoft.Json.Serialization.DefaultContractResolver
+            {
+                IgnoreSerializableAttribute = false
+            }
         };
 
         public static byte[] Serialize<T>(T obj)

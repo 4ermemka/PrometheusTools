@@ -1,5 +1,4 @@
-﻿using Assets.Shared.ChangeDetector;
-using System.Collections.Generic;
+﻿using Assets.Shared.SyncSystem.Core;
 
 namespace Assets.Scripts.Network.NetCore
 {
@@ -9,21 +8,9 @@ namespace Assets.Scripts.Network.NetCore
     /// </summary>
     public sealed class PatchMessage
     {
-        /// <summary>
-        /// Путь до изменённого поля в дереве WorldState.
-        /// Например: [ "Counters", "[1]", "Value" ].
-        /// </summary>
-        public List<FieldPathSegment> Path { get; set; }
-
-        /// <summary>
-        /// Новое значение для указанного поля (после применения патча).
-        /// </summary>
-        public object NewValue { get; set; }
-
-        public PatchMessage()
-        {
-            Path = new List<FieldPathSegment>();
-        }
+        public string Path;
+        public object? NewValue;
+        public object? OldValue;
     }
 
 }

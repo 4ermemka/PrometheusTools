@@ -1,7 +1,4 @@
-﻿using System.Collections;
-using UnityEngine;
-
-namespace Assets.Shared.Network.NetCore.Messages
+﻿namespace Assets.Shared.Network.NetCore.Messages
 {
     public sealed class HandshakeMessage
     {
