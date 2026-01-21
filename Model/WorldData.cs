@@ -1,4 +1,5 @@
-﻿using Assets.Shared.SyncSystem.Core;
+﻿using Assets.Shared.SyncSystem.Collections;
+using Assets.Shared.SyncSystem.Core;
 using UnityEngine;
 
 namespace Assets.Shared.Model
@@ -6,7 +7,7 @@ namespace Assets.Shared.Model
     public class WorldState : TrackableNode
     {
         [SerializeField]
-        public BoxData BoxData = new();
+        public SyncList<BoxData> Boxes = new();
     }
 
     public class BoxData : TrackableNode
@@ -15,7 +16,7 @@ namespace Assets.Shared.Model
 
         public BoxData()
         {
-            Position.Value = Vector2Dto.One();
+            Position.Value = Vector2Dto.Zero();
         }
     }
 }

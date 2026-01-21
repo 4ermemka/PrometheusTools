@@ -1,7 +1,5 @@
 ﻿using Assets.Scripts.Network.NetCore;
 using System;
-using System.Collections;
-using UnityEngine;
 
 namespace Assets.Shared.SyncSystem.Core
 {
