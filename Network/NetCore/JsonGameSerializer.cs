@@ -19,9 +19,8 @@ namespace Assets.Scripts.Network.NetCore
             
             // Форматирование для отладки
             Formatting = Formatting.Indented,
-            
-            // Сериализация типов
-            TypeNameHandling = TypeNameHandling.Auto,
+
+            TypeNameHandling = TypeNameHandling.None, // Не добавлять информацию о типе
             
             // Игнорировать поля/свойства с атрибутом [JsonIgnore]
             ContractResolver = new Newtonsoft.Json.Serialization.DefaultContractResolver
