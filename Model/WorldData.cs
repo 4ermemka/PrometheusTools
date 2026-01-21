@@ -1,13 +1,21 @@
-﻿using Assets.Shared.ChangeDetector;
-using Assets.Shared.ChangeDetector.Collections;
-using System;
+﻿using Assets.Shared.SyncSystem.Core;
+using UnityEngine;
 
 namespace Assets.Shared.Model
 {
-    [Serializable]
-    public class WorldData : SyncNode
+    public class WorldState : TrackableNode
     {
-        [SyncField]
-        public SyncList<BoxData> Boxes { get; private set; } = new();
+        [SerializeField]
+        public BoxData BoxData = new();
+    }
+
+    public class BoxData : TrackableNode
+    {
+        public Sync<Vector2Dto> Position = new Sync<Vector2Dto>();
+
+        public BoxData()
+        {
+            Position.Value = Vector2Dto.One();
+        }
     }
 }
