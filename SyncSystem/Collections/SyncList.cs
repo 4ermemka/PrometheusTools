@@ -8,6 +8,11 @@ using UnityEngine;
 
 namespace Assets.Shared.SyncSystem.Collections
 {
+    using System;
+    using System.Collections;
+    using System.Collections.Generic;
+    using System.Linq;
+    using UnityEngine;
 
     public class SyncList<T> : TrackableNode, IList<T>
     {
@@ -28,7 +33,6 @@ namespace Assets.Shared.SyncSystem.Collections
                     _items[index] = value;
                     SubscribeToElement(value, index);
 
-                    // Генерируем патч для замены элемента
                     OnChanged($"[{index}]", oldValue, value);
                 }
             }
@@ -152,55 +156,166 @@ namespace Assets.Shared.SyncSystem.Collections
 
         #endregion
 
-        #region Переопределение ApplyPatch и ApplyPatchInternal
+        #region Переопределение ApplyPatchInternal для обработки индексов
+
+        protected override void ApplyPatchInternal(string[] pathParts, int currentIndex, object value)
+        {
+            if (currentIndex >= pathParts.Length) return;
+
+            var currentPart = pathParts[currentIndex];
+
+            // Проверяем, является ли текущая часть индексом списка
+            if (currentPart.StartsWith("[") && currentPart.EndsWith("]"))
+            {
+                string indexStr = currentPart.Substring(1, currentPart.Length - 2);
+                if (!int.TryParse(indexStr, out int elementIndex))
+                {
+                    Debug.LogError($"SyncList: Invalid index format: {currentPart}");
+                    return;
+                }
+
+                if (elementIndex < 0 || elementIndex >= _items.Count)
+                {
+                    Debug.LogError($"SyncList: Index out of range: {elementIndex} (Count: {_items.Count})");
+                    return;
+                }
+
+                var element = _items[elementIndex];
+
+                if (currentIndex == pathParts.Length - 1)
+                {
+                    ApplyReplaceOperation(elementIndex, value);
+                    return;
+                }
+
+                if (element is ITrackable trackableElement)
+                {
+                    var remainingPath = string.Join(".", pathParts, currentIndex + 1, pathParts.Length - currentIndex - 1);
+                    trackableElement.ApplyPatch(remainingPath, value);
+                }
+            }
+            else if (currentPart.Contains("/"))
+            {
+                ApplyCollectionOperation(currentPart, value);
+            }
+            else
+            {
+                base.ApplyPatchInternal(pathParts, currentIndex, value);
+            }
+        }
+
+        #endregion
+
+        #region Переопределение BuildSnapshot для правильного формата
+
+        public override void BuildSnapshot(string currentPath, Dictionary<string, object> snapshot)
+        {
+            // Вместо создания путей вида "Boxes[0].Position", создаем вложенный словарь
+            var listData = new Dictionary<string, object>();
+
+            for (int i = 0; i < _items.Count; i++)
+            {
+                var element = _items[i];
+                var elementKey = i.ToString(); // Используем строковое представление индекса
+
+                if (element is TrackableNode node)
+                {
+                    // Для TrackableNode элементов создаем их снапшот
+                    var elementSnapshot = new Dictionary<string, object>();
+                    node.BuildSnapshot("", elementSnapshot);
+
+                    // Добавляем только непустые снапшоты
+                    if (elementSnapshot.Count > 0)
+                    {
+                        listData[elementKey] = elementSnapshot;
+                    }
+                }
+                else
+                {
+                    // Простые типы добавляем как есть
+                    listData[elementKey] = element;
+                }
+            }
+
+            // Добавляем метаданные
+            listData["_count"] = _items.Count;
+            listData["_type"] = "SyncList";
+            listData["_itemType"] = typeof(T).FullName;
+
+            // Ключ для сохранения в общий снапшот
+            var snapshotKey = string.IsNullOrEmpty(currentPath) ? "_list" : $"{currentPath}._list";
+            snapshot[snapshotKey] = listData;
+
+            // НЕ вызываем base.BuildSnapshot, чтобы избежать дублирования
+        }
+
+        public override Dictionary<string, object> CreateSnapshot()
+        {
+            var snapshot = new Dictionary<string, object>();
+            BuildSnapshot("", snapshot);
+            return snapshot;
+        }
+
+        #endregion
+
+        #region Переопределение ApplySnapshot для нового формата
 
         public override void ApplySnapshot(Dictionary<string, object> snapshot)
         {
             if (snapshot == null) return;
 
-            // Очищаем текущий список
-            Clear();
+            // Ищем данные списка в снапшоте
+            // Пробуем разные ключи, так как путь может быть разным
+            Dictionary<string, object> listData = null;
 
-            // Определяем максимальный индекс, чтобы знать, сколько элементов нужно восстановить
-            int maxIndex = -1;
-            var indexPaths = new List<string>();
-
-            foreach (var key in snapshot.Keys)
+            foreach (var kvp in snapshot)
             {
-                if (key.EndsWith("]"))
+                if (kvp.Key.EndsWith("._list") || kvp.Key == "_list")
                 {
-                    // Ищем путь с индексом: "Players[0]", "Players[0].Health", "Players[1].Position.x"
-                    var bracketIndex = key.LastIndexOf('[');
-                    if (bracketIndex != -1)
+                    if (kvp.Value is Dictionary<string, object> data)
                     {
-                        var closeBracketIndex = key.IndexOf(']', bracketIndex);
-                        if (closeBracketIndex != -1)
-                        {
-                            var indexStr = key.Substring(bracketIndex + 1, closeBracketIndex - bracketIndex - 1);
-                            if (int.TryParse(indexStr, out int index))
-                            {
-                                maxIndex = Math.Max(maxIndex, index);
-                                indexPaths.Add(key);
-                            }
-                        }
+                        listData = data;
+                        break;
                     }
                 }
             }
 
-            // Создаем элементы для каждого индекса
-            for (int i = 0; i <= maxIndex; i++)
+            if (listData == null)
             {
-                // Ищем все пути, начинающиеся с текущего индекса
-                var indexKey = $"[{i}]";
-                var elementPaths = indexPaths.Where(p => p.Contains($"[{i}]")).ToList();
+                Debug.LogError("SyncList: No list data found in snapshot");
+                return;
+            }
 
-                if (elementPaths.Count > 0)
+            // Извлекаем метаданные
+            if (!listData.TryGetValue("_count", out var countObj) || !(countObj is int count))
+            {
+                Debug.LogError("SyncList: Invalid or missing count in snapshot");
+                return;
+            }
+
+            // Восстанавливаем элементы
+            Clear();
+
+            for (int i = 0; i < count; i++)
+            {
+                var elementKey = i.ToString();
+                if (listData.TryGetValue(elementKey, out var elementData))
                 {
-                    // Создаем элемент
-                    T item = CreateItemFromSnapshot(snapshot, elementPaths, i);
+                    T item;
+
+                    if (elementData is Dictionary<string, object> elementDict)
+                    {
+                        // Это TrackableNode
+                        item = CreateItemFromSnapshot(elementDict);
+                    }
+                    else
+                    {
+                        // Простой тип
+                        item = ConvertValue<T>(elementData);
+                    }
+
                     if (item != null)
                     {
-                        // Добавляем в список (без генерации событий)
                         AddSilent(item);
                     }
                 }
@@ -210,59 +325,33 @@ namespace Assets.Shared.SyncSystem.Collections
             OnPatched("", _items);
         }
 
-        // Ключевое изменение: переопределяем ApplyPatchInternal для обработки индексов
-        protected override void ApplyPatchInternal(string[] pathParts, int currentIndex, object value)
+        private T CreateItemFromSnapshot(Dictionary<string, object> elementSnapshot)
         {
-            if (currentIndex >= pathParts.Length) return;
-
-            var currentPart = pathParts[currentIndex];
-
-            // Проверяем, является ли текущая часть индексом списка (формат "[index]")
-            if (currentPart.StartsWith("[") && currentPart.EndsWith("]"))
+            try
             {
-                // Извлекаем индекс из строки вида "[index]"
-                string indexStr = currentPart.Substring(1, currentPart.Length - 2);
-                if (!int.TryParse(indexStr, out int elementIndex))
+                T item = Activator.CreateInstance<T>();
+
+                if (item is TrackableNode node)
                 {
-                    Debug.LogError($"SyncList: Invalid index format: {currentPart}");
-                    return;
+                    // Применяем снапшот к элементу
+                    node.ApplySnapshot(elementSnapshot);
                 }
 
-                // Проверяем границы
-                if (elementIndex < 0 || elementIndex >= _items.Count)
-                {
-                    Debug.LogError($"SyncList: Index out of range: {elementIndex} (Count: {_items.Count})");
-                    return;
-                }
-
-                // Получаем элемент
-                var element = _items[elementIndex];
-
-                // Если это последняя часть пути - заменяем элемент
-                if (currentIndex == pathParts.Length - 1)
-                {
-                    ApplyReplaceOperation(elementIndex, value);
-                    return;
-                }
-
-                // Если элемент ITrackable, передаем ему оставшийся путь
-                if (element is ITrackable trackableElement)
-                {
-                    // Формируем оставшийся путь
-                    var remainingPath = string.Join(".", pathParts, currentIndex + 1, pathParts.Length - currentIndex - 1);
-                    trackableElement.ApplyPatch(remainingPath, value);
-                }
+                return item;
             }
-            else if (currentPart.Contains("/"))
+            catch (Exception ex)
             {
-                // Это операция над списком (add/0, remove/2 и т.д.)
-                ApplyCollectionOperation(currentPart, value);
+                Debug.LogError($"SyncList: Failed to create item from snapshot: {ex.Message}");
+                return default(T);
             }
-            else
-            {
-                // Неизвестный формат - пробуем базовую обработку
-                base.ApplyPatchInternal(pathParts, currentIndex, value);
-            }
+        }
+
+        // Вспомогательный метод для добавления без генерации событий
+        private void AddSilent(T item)
+        {
+            int index = _items.Count;
+            _items.Add(item);
+            SubscribeToElement(item, index);
         }
 
         #endregion
@@ -427,113 +516,6 @@ namespace Assets.Shared.SyncSystem.Collections
 
         #endregion
 
-        #region Снапшоты
-
-        public override Dictionary<string, object> CreateSnapshot()
-        {
-            var snapshot = new Dictionary<string, object>();
-            BuildSnapshot("", snapshot);
-            return snapshot;
-        }
-
-        private T CreateItemFromSnapshot(Dictionary<string, object> snapshot, List<string> elementPaths, int index)
-        {
-            // Для простых типов
-            if (typeof(T).IsPrimitive || typeof(T) == typeof(string) || typeof(T) == typeof(Vector2Dto))
-            {
-                // Ищем прямое значение для этого индекса
-                var directKey = $"[{index}]";
-                if (snapshot.TryGetValue(directKey, out var value))
-                {
-                    return JsonGameSerializer.ConvertValue<T>(value);
-                }
-            }
-            // Для TrackableNode типов
-            else if (typeof(TrackableNode).IsAssignableFrom(typeof(T)))
-            {
-                try
-                {
-                    T item = Activator.CreateInstance<T>();
-                    if (item is TrackableNode node)
-                    {
-                        // Создаем под-снапшот для этого элемента
-                        var elementSnapshot = new Dictionary<string, object>();
-
-                        foreach (var path in elementPaths)
-                        {
-                            // Преобразуем "Players[0].Health" → "Health"
-                            var afterBracket = path.Substring(path.IndexOf(']') + 1);
-                            if (afterBracket.StartsWith("."))
-                            {
-                                var propertyPath = afterBracket.Substring(1);
-                                elementSnapshot[propertyPath] = snapshot[path];
-                            }
-                        }
-
-                        node.ApplySnapshot(elementSnapshot);
-                        return item;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogError($"Failed to create item from snapshot for index {index}: {ex.Message}");
-                }
-            }
-
-            return default(T);
-        }
-
-        // Вспомогательный метод для добавления без генерации событий
-        private void AddSilent(T item)
-        {
-            int index = _items.Count;
-            _items.Add(item);
-            SubscribeToElement(item, index);
-        }
-        
-        public override void BuildSnapshot(string currentPath, Dictionary<string, object> snapshot)
-        {
-            // Сохраняем элементы списка с индексами
-            for (int i = 0; i < _items.Count; i++)
-            {
-                var element = _items[i];
-                var elementPath = string.IsNullOrEmpty(currentPath) ? $"[{i}]" : $"{currentPath}[{i}]";
-
-                if (element is TrackableNode node)
-                {
-                    // Рекурсивно сохраняем TrackableNode элементы
-                    node.BuildSnapshot(elementPath, snapshot);
-                }
-                else if (element is ITrackable trackable)
-                {
-                    // Для простых ITrackable сохраняем их значение
-                    // Но это сложно без общего метода GetValue в ITrackable
-                    // Поэтому используем обходной путь через JSON
-                    try
-                    {
-                        string json = JsonGameSerializer.Serialize(element);
-                        snapshot[elementPath] = json;
-                    }
-                    catch (Exception ex)
-                    {
-                        Debug.LogError($"Failed to serialize element at index {i}: {ex.Message}");
-                    }
-                }
-                else
-                {
-                    // Простые типы сохраняем как есть
-                    snapshot[elementPath] = element;
-                }
-            }
-
-            // Также сохраняем операционные поля списка, если они есть
-            // Например, счетчик элементов или другие метаданные
-            var countPath = string.IsNullOrEmpty(currentPath) ? "_count" : $"{currentPath}._count";
-            snapshot[countPath] = _items.Count;
-        }
-
-        #endregion
-
         #region GetValue
 
         public override object GetValue(string path)
@@ -543,7 +525,6 @@ namespace Assets.Shared.SyncSystem.Collections
                 return this;
             }
 
-            // Разбиваем путь на части
             var parts = path.Split('.');
             return GetValueInternal(parts, 0);
         }
@@ -554,7 +535,6 @@ namespace Assets.Shared.SyncSystem.Collections
 
             var currentPart = pathParts[currentIndex];
 
-            // Проверяем, является ли текущая часть индексом
             if (currentPart.StartsWith("[") && currentPart.EndsWith("]"))
             {
                 string indexStr = currentPart.Substring(1, currentPart.Length - 2);
