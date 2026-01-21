@@ -8,12 +8,6 @@ using UnityEngine;
 
 namespace Assets.Shared.SyncSystem.Collections
 {
-    using System;
-    using System.Collections;
-    using System.Collections.Generic;
-    using System.Linq;
-    using UnityEngine;
-
     public class SyncList<T> : TrackableNode, IList<T>
     {
         private readonly List<T> _items = new List<T>();
@@ -156,7 +150,204 @@ namespace Assets.Shared.SyncSystem.Collections
 
         #endregion
 
-        #region Переопределение ApplyPatchInternal для обработки индексов
+        #region Переопределение ApplyPatch для обработки снапшотов
+
+        public override void ApplyPatch(string path, object value)
+        {
+            if (string.IsNullOrEmpty(path))
+            {
+                // Это может быть снапшот всего списка
+                if (value is Dictionary<string, object> dict && dict.ContainsKey("_items"))
+                {
+                    ApplySnapshot(dict);
+                    return;
+                }
+            }
+
+            // Проверяем, не является ли путь специальным ключом для списка
+            if (path == "_list" || path.EndsWith("._list"))
+            {
+                if (value is Dictionary<string, object> dict)
+                {
+                    ApplySnapshot(dict);
+                    return;
+                }
+            }
+
+            // Во всех остальных случаях передаем стандартной обработке
+            base.ApplyPatch(path, value);
+        }
+
+        #endregion
+
+        #region Переопределение BuildSnapshot и CreateSnapshot
+
+        public override void BuildSnapshot(string currentPath, Dictionary<string, object> snapshot)
+        {
+            // Вместо создания путей вида "Boxes[0].Position",
+            // создаем отдельный словарь для списка
+            var listData = new Dictionary<string, object>();
+
+            // Сохраняем элементы
+            for (int i = 0; i < _items.Count; i++)
+            {
+                var element = _items[i];
+
+                if (element is TrackableNode node)
+                {
+                    // Для TrackableNode элементов сохраняем их снапшот
+                    var elementSnapshot = node.CreateSnapshot();
+                    listData[$"{i}"] = elementSnapshot;
+                }
+                else
+                {
+                    // Простые типы сохраняем как есть
+                    listData[$"{i}"] = element;
+                }
+            }
+
+            // Добавляем метаданные
+            listData["_count"] = _items.Count;
+            listData["_type"] = "SyncList";
+            listData["_itemType"] = typeof(T).FullName;
+
+            // Ключ для сохранения в общий снапшот
+            // Если currentPath не пустой, добавляем суффикс ._list
+            if (string.IsNullOrEmpty(currentPath))
+            {
+                snapshot["_list"] = listData;
+            }
+            else
+            {
+                snapshot[$"{currentPath}._list"] = listData;
+            }
+        }
+
+        public override Dictionary<string, object> CreateSnapshot()
+        {
+            var snapshot = new Dictionary<string, object>();
+            BuildSnapshot("", snapshot);
+            return snapshot;
+        }
+
+        #endregion
+
+        #region Применение снапшота
+
+        public override void ApplySnapshot(Dictionary<string, object> snapshot)
+        {
+            // Ищем данные списка в снапшоте
+            Dictionary<string, object> listData = null;
+
+            // Пробуем найти ключ с суффиксом ._list или просто _list
+            foreach (var kvp in snapshot)
+            {
+                if (kvp.Key == "_list" || kvp.Key.EndsWith("._list"))
+                {
+                    if (kvp.Value is Dictionary<string, object> data)
+                    {
+                        listData = data;
+                        break;
+                    }
+                }
+            }
+
+            if (listData == null)
+            {
+                // Возможно, snapshot уже содержит данные списка напрямую
+                if (snapshot.ContainsKey("_count"))
+                {
+                    listData = snapshot;
+                }
+                else
+                {
+                    Debug.LogError("SyncList: No valid list data found in snapshot");
+                    return;
+                }
+            }
+
+            // Извлекаем количество элементов
+            if (!listData.TryGetValue("_count", out var countObj) || !(countObj is int count))
+            {
+                Debug.LogError("SyncList: Invalid or missing count in snapshot");
+                return;
+            }
+
+            // Очищаем текущий список
+            ClearSilent();
+
+            // Восстанавливаем элементы
+            for (int i = 0; i < count; i++)
+            {
+                var elementKey = i.ToString();
+                if (listData.TryGetValue(elementKey, out var elementData))
+                {
+                    T item;
+
+                    if (elementData is Dictionary<string, object> elementDict)
+                    {
+                        // Это TrackableNode элемент
+                        item = CreateItemFromSnapshot(elementDict);
+                    }
+                    else
+                    {
+                        // Простой тип
+                        item = JsonGameSerializer.ConvertValue<T>(elementData);
+                    }
+
+                    if (item != null)
+                    {
+                        AddSilent(item);
+                    }
+                }
+            }
+
+            // Уведомляем об изменении
+            OnPatched("", _items);
+        }
+
+        private T CreateItemFromSnapshot(Dictionary<string, object> elementSnapshot)
+        {
+            try
+            {
+                T item = Activator.CreateInstance<T>();
+
+                if (item is TrackableNode node)
+                {
+                    // Применяем снапшот к элементу
+                    node.ApplySnapshot(elementSnapshot);
+                }
+
+                return item;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"SyncList: Failed to create item from snapshot: {ex.Message}");
+                return default(T);
+            }
+        }
+
+        private void ClearSilent()
+        {
+            foreach (var item in _items)
+            {
+                UnsubscribeFromElement(item);
+            }
+
+            _items.Clear();
+            _elementChangeHandlers.Clear();
+        }
+
+        private void AddSilent(T item)
+        {
+            int index = _items.Count;
+            _items.Add(item);
+            SubscribeToElement(item, index);
+        }
+
+        #endregion
+
+        #region Применение операций (вызываются из сети)
 
         protected override void ApplyPatchInternal(string[] pathParts, int currentIndex, object value)
         {
@@ -203,160 +394,6 @@ namespace Assets.Shared.SyncSystem.Collections
                 base.ApplyPatchInternal(pathParts, currentIndex, value);
             }
         }
-
-        #endregion
-
-        #region Переопределение BuildSnapshot для правильного формата
-
-        public override void BuildSnapshot(string currentPath, Dictionary<string, object> snapshot)
-        {
-            // Вместо создания путей вида "Boxes[0].Position", создаем вложенный словарь
-            var listData = new Dictionary<string, object>();
-
-            for (int i = 0; i < _items.Count; i++)
-            {
-                var element = _items[i];
-                var elementKey = i.ToString(); // Используем строковое представление индекса
-
-                if (element is TrackableNode node)
-                {
-                    // Для TrackableNode элементов создаем их снапшот
-                    var elementSnapshot = new Dictionary<string, object>();
-                    node.BuildSnapshot("", elementSnapshot);
-
-                    // Добавляем только непустые снапшоты
-                    if (elementSnapshot.Count > 0)
-                    {
-                        listData[elementKey] = elementSnapshot;
-                    }
-                }
-                else
-                {
-                    // Простые типы добавляем как есть
-                    listData[elementKey] = element;
-                }
-            }
-
-            // Добавляем метаданные
-            listData["_count"] = _items.Count;
-            listData["_type"] = "SyncList";
-            listData["_itemType"] = typeof(T).FullName;
-
-            // Ключ для сохранения в общий снапшот
-            var snapshotKey = string.IsNullOrEmpty(currentPath) ? "_list" : $"{currentPath}._list";
-            snapshot[snapshotKey] = listData;
-
-            // НЕ вызываем base.BuildSnapshot, чтобы избежать дублирования
-        }
-
-        public override Dictionary<string, object> CreateSnapshot()
-        {
-            var snapshot = new Dictionary<string, object>();
-            BuildSnapshot("", snapshot);
-            return snapshot;
-        }
-
-        #endregion
-
-        #region Переопределение ApplySnapshot для нового формата
-
-        public override void ApplySnapshot(Dictionary<string, object> snapshot)
-        {
-            if (snapshot == null) return;
-
-            // Ищем данные списка в снапшоте
-            // Пробуем разные ключи, так как путь может быть разным
-            Dictionary<string, object> listData = null;
-
-            foreach (var kvp in snapshot)
-            {
-                if (kvp.Key.EndsWith("._list") || kvp.Key == "_list")
-                {
-                    if (kvp.Value is Dictionary<string, object> data)
-                    {
-                        listData = data;
-                        break;
-                    }
-                }
-            }
-
-            if (listData == null)
-            {
-                Debug.LogError("SyncList: No list data found in snapshot");
-                return;
-            }
-
-            // Извлекаем метаданные
-            if (!listData.TryGetValue("_count", out var countObj) || !(countObj is int count))
-            {
-                Debug.LogError("SyncList: Invalid or missing count in snapshot");
-                return;
-            }
-
-            // Восстанавливаем элементы
-            Clear();
-
-            for (int i = 0; i < count; i++)
-            {
-                var elementKey = i.ToString();
-                if (listData.TryGetValue(elementKey, out var elementData))
-                {
-                    T item;
-
-                    if (elementData is Dictionary<string, object> elementDict)
-                    {
-                        // Это TrackableNode
-                        item = CreateItemFromSnapshot(elementDict);
-                    }
-                    else
-                    {
-                        // Простой тип
-                        item = ConvertValue<T>(elementData);
-                    }
-
-                    if (item != null)
-                    {
-                        AddSilent(item);
-                    }
-                }
-            }
-
-            // Уведомляем об изменении
-            OnPatched("", _items);
-        }
-
-        private T CreateItemFromSnapshot(Dictionary<string, object> elementSnapshot)
-        {
-            try
-            {
-                T item = Activator.CreateInstance<T>();
-
-                if (item is TrackableNode node)
-                {
-                    // Применяем снапшот к элементу
-                    node.ApplySnapshot(elementSnapshot);
-                }
-
-                return item;
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError($"SyncList: Failed to create item from snapshot: {ex.Message}");
-                return default(T);
-            }
-        }
-
-        // Вспомогательный метод для добавления без генерации событий
-        private void AddSilent(T item)
-        {
-            int index = _items.Count;
-            _items.Add(item);
-            SubscribeToElement(item, index);
-        }
-
-        #endregion
-
-        #region Применение операций (вызываются из сети)
 
         private void ApplyCollectionOperation(string operationPath, object value)
         {
