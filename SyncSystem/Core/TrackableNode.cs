@@ -68,7 +68,7 @@ namespace Assets.Shared.SyncSystem.Core
             _initialized = true;
         }
 
-        public void ApplyPatch(string path, object value)
+        public virtual void ApplyPatch(string path, object value)
         {
             if (string.IsNullOrEmpty(path))
                 return;
@@ -77,7 +77,7 @@ namespace Assets.Shared.SyncSystem.Core
             ApplyPatchInternal(parts, 0, value);
         }
 
-        private void ApplyPatchInternal(string[] pathParts, int index, object value)
+        protected virtual void ApplyPatchInternal(string[] pathParts, int index, object value)
         {
             if (index >= pathParts.Length) return;
 
@@ -93,14 +93,29 @@ namespace Assets.Shared.SyncSystem.Core
                 // Конечный элемент - применяем патч здесь
                 trackable.ApplyPatch("", value);
             }
-            else if (trackable is TrackableNode node)
+            else if (CanHandleRecursivePath(trackable, pathParts, index))
             {
                 // Рекурсивно спускаемся дальше
-                node.ApplyPatchInternal(pathParts, index + 1, value);
+                HandleRecursivePath(trackable, pathParts, index, value);
             }
         }
 
-        public object GetValue(string path)
+        // Добавляем виртуальные методы для расширения логики
+        protected virtual bool CanHandleRecursivePath(ITrackable trackable, string[] pathParts, int currentIndex)
+        {
+            // По умолчанию только TrackableNode могут обрабатывать рекурсивные пути
+            return trackable is TrackableNode;
+        }
+
+        protected virtual void HandleRecursivePath(ITrackable trackable, string[] pathParts, int currentIndex, object value)
+        {
+            if (trackable is TrackableNode node)
+            {
+                node.ApplyPatchInternal(pathParts, currentIndex + 1, value);
+            }
+        }
+        
+        public virtual object GetValue(string path)
         {
             if (string.IsNullOrEmpty(path))
                 return null;
