@@ -28,7 +28,7 @@ namespace Assets.Shared.SyncSystem.Collections
                     SubscribeToElement(value, index);
 
                     // Генерируем патч для замены элемента
-                    GenerateCollectionPatch("replace", index, value);
+                    OnChanged($"replace/{index}", oldValue, value);
                 }
             }
         }
@@ -41,7 +41,7 @@ namespace Assets.Shared.SyncSystem.Collections
             int index = _items.Count;
             _items.Add(item);
             SubscribeToElement(item, index);
-            GenerateCollectionPatch("add", index, item);
+            OnChanged($"add/{index}", null, item);
         }
 
         public void Insert(int index, T item)
@@ -49,7 +49,7 @@ namespace Assets.Shared.SyncSystem.Collections
             _items.Insert(index, item);
             ReindexElementsFrom(index + 1);
             SubscribeToElement(item, index);
-            GenerateCollectionPatch("insert", index, item);
+            OnChanged($"insert/{index}", null, item);
         }
 
         public bool Remove(T item)
@@ -69,21 +69,22 @@ namespace Assets.Shared.SyncSystem.Collections
             UnsubscribeFromElement(oldValue);
             _items.RemoveAt(index);
             ReindexElementsFrom(index);
-            GenerateCollectionPatch("remove", index, oldValue);
+            OnChanged($"remove/{index}", oldValue, null);
         }
 
         public void Clear()
         {
+            var oldItems = _items.ToList();
+
             foreach (var item in _items)
             {
                 UnsubscribeFromElement(item);
             }
 
-            var oldItems = _items.ToList();
             _items.Clear();
             _elementChangeHandlers.Clear();
 
-            GenerateCollectionPatch("clear", -1, oldItems);
+            OnChanged("clear", oldItems, null);
         }
 
         public bool Contains(T item) => _items.Contains(item);
@@ -111,8 +112,8 @@ namespace Assets.Shared.SyncSystem.Collections
                         elementPath += $".{path}";
                     }
 
-                    // Используем метод TrackableNode для генерации события
-                    OnChildChanged(trackable as TrackableNode, elementPath, oldVal, newVal);
+                    // Пробрасываем изменение элемента наверх
+                    OnChanged(elementPath, oldVal, newVal);
                 };
 
                 trackable.Changed += handler;
@@ -151,9 +152,8 @@ namespace Assets.Shared.SyncSystem.Collections
 
         #endregion
 
-        #region Переопределение методов TrackableNode
+        #region Переопределение ApplyPatch для обработки специфичных путей
 
-        // Переопределяем ApplyPatch для обработки специфичных для списка путей
         public override void ApplyPatch(string path, object value)
         {
             if (string.IsNullOrEmpty(path))
@@ -163,38 +163,43 @@ namespace Assets.Shared.SyncSystem.Collections
                 return;
             }
 
-            // Если путь содержит ".", значит нужно спуститься вглубь
-            // Разбиваем путь на части
-            var parts = path.Split(new[] { '.' }, 2);
+            // Разбираем путь на части
+            var dotIndex = path.IndexOf('.');
 
-            if (parts.Length == 1)
+            if (dotIndex >= 0)
             {
-                // Только операция над списком или индекс элемента
-                ProcessListOperation(path, value);
-            }
-            else
-            {
-                // Путь вида "[index].property" или "operation.property"
-                var firstPart = parts[0];
-                var remainingPath = parts[1];
+                // Путь содержит точку: [index].property или operation.property
+                var firstPart = path.Substring(0, dotIndex);
+                var remainingPath = path.Substring(dotIndex + 1);
 
                 if (firstPart.StartsWith("[") && firstPart.EndsWith("]"))
                 {
-                    // Обращение к элементу списка
-                    var indexStr = firstPart.Substring(1, firstPart.Length - 2);
-                    if (int.TryParse(indexStr, out int index) && index >= 0 && index < _items.Count)
-                    {
-                        var element = _items[index];
-                        if (element is ITrackable trackable)
-                        {
-                            trackable.ApplyPatch(remainingPath, value);
-                        }
-                    }
+                    // Обращение к элементу списка: [index].property
+                    ProcessElementPropertyPath(firstPart, remainingPath, value);
                 }
                 else
                 {
-                    // Операция с дополнительным путем (нестандартный случай)
-                    ProcessListOperation(path, value);
+                    // Неожиданный формат, передаем базовому классу
+                    base.ApplyPatch(path, value);
+                }
+            }
+            else
+            {
+                // Путь без точек - операция над списком или индекс
+                ProcessListOperation(path, value);
+            }
+        }
+
+        private void ProcessElementPropertyPath(string indexPart, string propertyPath, object value)
+        {
+            // Извлекаем индекс из строки вида "[index]"
+            var indexStr = indexPart.Substring(1, indexPart.Length - 2);
+            if (int.TryParse(indexStr, out int index) && index >= 0 && index < _items.Count)
+            {
+                var element = _items[index];
+                if (element is ITrackable trackable)
+                {
+                    trackable.ApplyPatch(propertyPath, value);
                 }
             }
         }
@@ -216,7 +221,7 @@ namespace Assets.Shared.SyncSystem.Collections
                     }
                     else if (operationPath[bracketIndex + 1] == '/')
                     {
-                        // [index]/operation - операция над элементом
+                        // [index]/operation - операция над элементом (нестандартный случай)
                         var operation = operationPath.Substring(bracketIndex + 2);
                         ApplyElementOperation(index, operation, value);
                     }
@@ -227,85 +232,11 @@ namespace Assets.Shared.SyncSystem.Collections
                 // Операция над списком
                 ApplyCollectionOperation(operationPath, value);
             }
-        }
-
-        // Переопределяем GetValue для поддержки доступа к элементам
-        public override object GetValue(string path)
-        {
-            if (string.IsNullOrEmpty(path))
+            else
             {
-                return this;
+                // Простой путь - передаем базовому классу
+                base.ApplyPatch(operationPath, value);
             }
-
-            if (path.StartsWith("[") && path.Contains("]"))
-            {
-                int bracketIndex = path.IndexOf(']');
-                string indexStr = path.Substring(1, bracketIndex - 1);
-
-                if (int.TryParse(indexStr, out int index) && index >= 0 && index < _items.Count)
-                {
-                    if (bracketIndex == path.Length - 1)
-                    {
-                        return _items[index];
-                    }
-                    else if (path[bracketIndex + 1] == '.')
-                    {
-                        string propertyPath = path.Substring(bracketIndex + 2);
-                        var element = _items[index];
-                        if (element is ITrackable trackable)
-                        {
-                            return trackable.GetValue(propertyPath);
-                        }
-                    }
-                }
-            }
-
-            return null;
-        }
-
-        #endregion
-
-        #region Операции над списком
-
-        private void GenerateCollectionPatch(string operation, int index, object value)
-        {
-            string path = operation;
-            if (index >= 0)
-            {
-                path += $"/{index}";
-            }
-
-            // Используем базовый метод для вызова события Changed
-            // Нужно создать временный обработчик или переопределить логику
-            // Вместо прямого вызова Changed, создаем временный TrackableNode
-            // или используем существующую инфраструктуру
-
-            // Временное решение: создаем специальный метод для вызова события
-            InvokeCollectionChanged(path, null, value);
-        }
-
-        // Новый метод для вызова Changed событий для операций коллекции
-        private void InvokeCollectionChanged(string path, object oldValue, object newValue)
-        {
-            // Так как Changed событие приватное в TrackableNode, мы не можем его вызвать напрямую
-            // Нужно использовать другой подход
-
-            // Временное решение: создать временный TrackableNode для генерации события
-            // Но лучше добавить защищенный метод в TrackableNode для вызова события
-
-            // Пока что используем такой подход:
-            // 1. Создаем временный класс-наследник TrackableNode
-            // 2. Или используем рефлексию (нежелательно)
-
-            // Вместо этого, давайте изменим подход:
-            // Будем использовать существующую инфраструктуру TrackableNode
-            // Создадим временное поле в SyncList для генерации событий
-
-            // Для простоты пока оставим так, но в реальном коде нужно решить эту проблему
-            Debug.Log($"SyncList: Generated patch {path}: {oldValue} -> {newValue}");
-
-            // Временное решение: используем OnChildChanged с null child
-            OnChildChanged(null, path, oldValue, newValue);
         }
 
         private void ApplyCollectionOperation(string operationPath, object value)
@@ -363,9 +294,12 @@ namespace Assets.Shared.SyncSystem.Collections
                 case "replace":
                     ApplyReplaceOperation(index, value);
                     break;
-                    // Можно добавить другие операции
             }
         }
+
+        #endregion
+
+        #region Применение операций (вызываются из сети)
 
         private void ApplyAddOperation(string[] parts, object value)
         {
@@ -380,8 +314,8 @@ namespace Assets.Shared.SyncSystem.Collections
             ReindexElementsFrom(index + 1);
             SubscribeToElement(item, index);
 
-            // Вызываем Patched событие
-            OnChildPatched(null, $"add/{index}", item);
+            // Уведомляем о применении патча из сети
+            OnPatched($"add/{index}", item);
         }
 
         private void ApplyInsertOperation(int index, object value)
@@ -391,7 +325,7 @@ namespace Assets.Shared.SyncSystem.Collections
             ReindexElementsFrom(index + 1);
             SubscribeToElement(item, index);
 
-            OnChildPatched(null, $"insert/{index}", item);
+            OnPatched($"insert/{index}", item);
         }
 
         private void ApplyRemoveOperation(int index, object value)
@@ -403,7 +337,7 @@ namespace Assets.Shared.SyncSystem.Collections
                 _items.RemoveAt(index);
                 ReindexElementsFrom(index);
 
-                OnChildPatched(null, $"remove/{index}", oldItem);
+                OnPatched($"remove/{index}", oldItem);
             }
         }
 
@@ -418,7 +352,7 @@ namespace Assets.Shared.SyncSystem.Collections
                 _items[index] = newItem;
                 SubscribeToElement(newItem, index);
 
-                OnChildPatched(null, $"[{index}]", newItem);
+                OnPatched($"[{index}]", newItem);
             }
         }
 
@@ -438,6 +372,7 @@ namespace Assets.Shared.SyncSystem.Collections
 
                 _items.Insert(adjustedToIndex, item);
 
+                // Переподписываем затронутые элементы
                 int start = Math.Min(fromIndex, adjustedToIndex);
                 int end = Math.Max(fromIndex, adjustedToIndex);
                 for (int i = start; i <= end; i++)
@@ -453,7 +388,7 @@ namespace Assets.Shared.SyncSystem.Collections
                     }
                 }
 
-                OnChildPatched(null, $"move/{fromIndex}/{toIndex}", item);
+                OnPatched($"move/{fromIndex}/{toIndex}", item);
             }
         }
 
@@ -469,7 +404,7 @@ namespace Assets.Shared.SyncSystem.Collections
             _items.Clear();
             _elementChangeHandlers.Clear();
 
-            OnChildPatched(null, "clear", oldItems);
+            OnPatched("clear", oldItems);
         }
 
         private TValue ConvertValue<TValue>(object value)
@@ -481,42 +416,111 @@ namespace Assets.Shared.SyncSystem.Collections
 
         #region Снапшоты
 
+        public override Dictionary<string, object> CreateSnapshot()
+        {
+            var snapshot = new Dictionary<string, object>();
+            var items = new List<object>();
+
+            foreach (var item in _items)
+            {
+                if (item is ITrackable trackable)
+                {
+                    // Для ITrackable объектов используем их собственные снапшоты
+                    if (trackable is TrackableNode node)
+                    {
+                        items.Add(node.CreateSnapshot());
+                    }
+                    else
+                    {
+                        // Для простых ITrackable сериализуем в JSON
+                        items.Add(JsonGameSerializer.Serialize(item));
+                    }
+                }
+                else
+                {
+                    items.Add(item);
+                }
+            }
+
+            snapshot["_items"] = items;
+            return snapshot;
+        }
+
+        public override void ApplySnapshot(Dictionary<string, object> snapshot)
+        {
+            if (snapshot == null) return;
+
+            // Очищаем текущий список
+            Clear();
+
+            if (snapshot.TryGetValue("_items", out var itemsObj) && itemsObj is List<object> itemsList)
+            {
+                foreach (var itemObj in itemsList)
+                {
+                    if (itemObj is Dictionary<string, object> itemDict)
+                    {
+                        // Это снапшот TrackableNode
+                        // В реальности нужно создать объект типа T и применить к нему снапшот
+                        // Это сложно без рефлексии, поэтому для простоты пропускаем
+                        Debug.LogWarning("SyncList: Cannot deserialize TrackableNode from snapshot without reflection");
+                    }
+                    else
+                    {
+                        // Простой объект
+                        T item = ConvertValue<T>(itemObj);
+                        Add(item);
+                    }
+                }
+            }
+        }
+
         private void ApplySnapshot(object snapshot)
         {
             if (snapshot is Dictionary<string, object> dict)
             {
-                // Применяем снапшот через базовый метод
-                base.ApplySnapshot(dict);
+                ApplySnapshot(dict);
             }
         }
 
         #endregion
 
-        #region Вспомогательные методы
+        #region GetValue (для обратной совместимости)
 
-        // Вспомогательные методы для вызова событий
-        private void OnChildChanged(TrackableNode child, string path, object oldValue, object newValue)
+        public override object GetValue(string path)
         {
-            // Используем рефлексию для вызова protected метода TrackableNode
-            // Или создаем protected метод в TrackableNode для этого
+            if (string.IsNullOrEmpty(path))
+            {
+                return this;
+            }
 
-            // Временное решение: переопределим логику в SyncList
-            // Будем напрямую вызывать обработчики событий через reflection
+            if (path.StartsWith("[") && path.Contains("]"))
+            {
+                int bracketIndex = path.IndexOf(']');
+                string indexStr = path.Substring(1, bracketIndex - 1);
 
-            // Пока просто логируем
-            Debug.Log($"SyncList: Child changed {path}: {oldValue} -> {newValue}");
-        }
+                if (int.TryParse(indexStr, out int index) && index >= 0 && index < _items.Count)
+                {
+                    if (bracketIndex == path.Length - 1)
+                    {
+                        return _items[index];
+                    }
+                    else if (path[bracketIndex + 1] == '.')
+                    {
+                        string propertyPath = path.Substring(bracketIndex + 2);
+                        var item = _items[index];
+                        if (item is ITrackable trackable)
+                        {
+                            return trackable.GetValue(propertyPath);
+                        }
+                    }
+                }
+            }
 
-        private void OnChildPatched(TrackableNode child, string path, object value)
-        {
-            Debug.Log($"SyncList: Child patched {path}: {value}");
-        }
-
-        public override string ToString()
-        {
-            return $"SyncList<{typeof(T).Name}>[{Count}]";
+            return null;
         }
 
         #endregion
+
+        public override string ToString() => $"SyncList<{typeof(T).Name}>[{Count}]";
     }
 }

@@ -31,6 +31,16 @@ namespace Assets.Shared.SyncSystem.Core
             remove => _patched -= value;
         }
 
+        protected virtual void OnChanged(string path, object oldValue, object newValue)
+        {
+            _changed?.Invoke(path, oldValue, newValue);
+        }
+
+        protected virtual void OnPatched(string path, object value)
+        {
+            _patched?.Invoke(path, value);
+        }
+
         protected TrackableNode() => InitializeTracking();
 
         protected virtual void InitializeTracking()
@@ -148,7 +158,7 @@ namespace Assets.Shared.SyncSystem.Core
         }
 
         // Методы для снапшотов
-        public Dictionary<string, object> CreateSnapshot()
+        public virtual Dictionary<string, object> CreateSnapshot()
         {
             var snapshot = new Dictionary<string, object>();
             BuildSnapshot("", snapshot);
@@ -174,7 +184,7 @@ namespace Assets.Shared.SyncSystem.Core
             }
         }
 
-        public void ApplySnapshot(Dictionary<string, object> snapshot)
+        public virtual void ApplySnapshot(Dictionary<string, object> snapshot)
         {
             foreach (var kvp in snapshot)
             {
