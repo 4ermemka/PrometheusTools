@@ -204,18 +204,9 @@ namespace Assets.Shared.SyncSystem.Collections
             // Если индекс выходит за пределы - создаем элементы до нужного индекса
             while (elementIndex >= _items.Count)
             {
-                // Для снапшотов создаем элементы правильного типа
-                if (IsSnapshotMode)
-                {
-                    // В режиме снапшота создаем элемент по умолчанию
-                    T newElement = CreateDefaultElement();
-                    AddSilent(newElement);
-                }
-                else
-                {
-                    // В обычном режиме (патчи) используем null как заглушку
-                    AddSilent(default(T));
-                }
+                // В режиме снапшота создаем элемент по умолчанию
+                T newElement = CreateDefaultElement();
+                AddSilent(newElement);
             }
 
             var element = _items[elementIndex];
@@ -392,9 +383,6 @@ namespace Assets.Shared.SyncSystem.Collections
         #endregion
 
         #region Вспомогательные методы для создания элементов
-
-        // Флаг, указывающий, что мы в режиме снапшота
-        private bool IsSnapshotMode { get; set; } = false;
 
         // Метод для создания элемента по умолчанию
         private T CreateDefaultElement()
@@ -665,9 +653,6 @@ namespace Assets.Shared.SyncSystem.Collections
 
         public override void ApplySnapshot(Dictionary<string, object> snapshot)
         {
-            // Устанавливаем флаг снапшота
-            IsSnapshotMode = true;
-
             try
             {
                 // Очищаем список
@@ -720,15 +705,15 @@ namespace Assets.Shared.SyncSystem.Collections
                     // Применяем данные к элементу
                     ApplyDataToElement(element, elementData);
                 }
+
+                OnPatched($"{this.GetType().Name}", _items);
             }
-            finally
+            catch (Exception ex)
             {
-                // Сбрасываем флаг снапшота
-                IsSnapshotMode = false;
+                Debug.LogError($"ApplySnapshot exception: {ex.Message}: {ex.StackTrace}");
             }
 
             // Уведомляем об изменении всего списка
-            OnPatched("", _items);
         }
 
         private T CreateElementForSnapshot(List<KeyValuePair<string, object>> elementData)
