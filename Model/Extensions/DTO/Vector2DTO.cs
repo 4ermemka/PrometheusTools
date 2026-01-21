@@ -2,7 +2,7 @@ using Newtonsoft.Json;
 using System;
 
 [Serializable]
-public struct Vector2Dto
+public class Vector2Dto
 {
     [JsonProperty("x")]
     public float x;
@@ -17,20 +17,12 @@ public struct Vector2Dto
     // Для отладки
     public static Vector2Dto Zero()
     {
-        return new Vector2Dto()
-        {
-            x = 0,
-            y = 0
-        };
+        return new Vector2Dto(0, 0);
     }
 
     public static Vector2Dto One()
     {
-        return new Vector2Dto()
-        {
-            x = 1,
-            y = 1
-        };
+        return new Vector2Dto(1, 1);
     }
 
     public override string ToString() => $"({x}, {y})";

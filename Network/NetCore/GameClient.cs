@@ -100,7 +100,47 @@ namespace Assets.Scripts.Network.NetCore
         }
 
         /// <summary>
+        /// Вызывается из MonoBehaviour.Update на главном потоке.
+        /// Применяем все накопленные патчи и выполняем отложенные действия.
+        /// </summary>
+        /// <summary>
+        /// Вызывается из MonoBehaviour.Update на главном потоке.
+        /// Применяем все накопленные патчи и выполняем отложенные действия.
+        /// </summary>
+        public void Update()
+        {
+            // 1. Применяем входящие патчи (Position и любые другие поля WorldState)
+            while (_incomingPatches.TryDequeue(out var patch))
+            {
+                if (patch?.ChangeData == null) continue;
+
+                Debug.Log($"[GameClient] Applying patch: {patch.ChangeData.Path}: {patch.ChangeData.OldValue} -> {patch.ChangeData.NewValue}");
+
+                // Ключевое изменение: передаем путь и новое значение
+                // Sync<T>.SetValueSilent сам разберется с типами
+                _worldState.ApplyPatch(patch.ChangeData.Path, patch.ChangeData.NewValue);
+            }
+
+            // 2. Выполняем отложенные действия (например, применение снапшота)
+            while (_mainThreadActions.TryDequeue(out var action))
+            {
+                try
+                {
+                    action();
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogException(ex);
+                }
+            }
+        }
+
+        /// <summary>
         /// Callback TCP‑транспорта. НЕ главный поток.
+        /// Здесь только раскладываем сообщения по очередям.
+        /// </summary>
+        /// <summary>
+        /// Callback TCP-транспорта. НЕ главный поток.
         /// Здесь только раскладываем сообщения по очередям.
         /// </summary>
         private void OnDataReceived(Guid _, ArraySegment<byte> data)
@@ -113,10 +153,10 @@ namespace Assets.Scripts.Network.NetCore
             {
                 case MessageType.SnapshotRequest:
                     {
+                        // Используем новый метод десериализации из байтов
                         var request = JsonGameSerializer.Deserialize<SnapshotRequestMessage>(payload);
                         if (request == null) return;
 
-                        // Важно: этот case должен быть активен только на хост-клиенте.
                         _mainThreadActions.Enqueue(() => HandleSnapshotRequest(request));
                         break;
                     }
@@ -145,24 +185,17 @@ namespace Assets.Scripts.Network.NetCore
         {
             try
             {
-                // Получаем снапшот текущего состояния в виде Dictionary<string, object>
+                // Получаем снапшот текущего состояния
                 var snapshotDict = _worldState.CreateSnapshot();
 
-                // Создаем временный WorldState для сериализации
-                var tempWorldState = new WorldState();
-                tempWorldState.ApplySnapshot(snapshotDict);
-
-                var worldBytes = JsonGameSerializer.Serialize(tempWorldState);
-
+                // Создаем сообщение со снапшотом
                 var snapshot = new SnapshotMessage
                 {
                     TargetClientId = request.RequestorClientId,
-                    WorldDataPayload = worldBytes
+                    WorldDataPayload = JsonGameSerializer.Serialize(snapshotDict)
                 };
 
                 var packet = MakePacket(MessageType.Snapshot, snapshot);
-
-                // Отправляем снапшот на сервер
                 await _transport.SendAsync(Guid.Empty, packet, CancellationToken.None);
 
                 Debug.Log($"[CLIENT-HOST] Snapshot sent to {request.RequestorClientId}");
@@ -173,55 +206,12 @@ namespace Assets.Scripts.Network.NetCore
             }
         }
 
-        /// <summary>
-        /// Вызывается из MonoBehaviour.Update на главном потоке.
-        /// Применяем все накопленные патчи и выполняем отложенные действия.
-        /// </summary>
-        public void Update()
-        {
-            // 1. Применяем входящие патчи
-            while (_incomingPatches.TryDequeue(out var patch))
-            {
-                if (patch == null) continue;
-
-                Debug.Log($"[GameClient] Applying patch: {patch.Path}: {patch.OldValue} -> {patch.NewValue}");
-
-                // Используем новый метод ApplyPatch с путем и значением
-                _worldState.ApplyPatch(patch.Path, patch.NewValue);
-            }
-
-            // 2. Выполняем отложенные действия
-            while (_mainThreadActions.TryDequeue(out var action))
-            {
-                try
-                {
-                    action();
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogException(ex);
-                }
-            }
-        }
-
-        /// <summary>
-        /// Применение снапшота: полная синхронизация WorldState с авторитетной версией.
-        /// Теперь WorldState использует Dictionary<string, object> для снапшотов.
-        /// </summary>
         private void ApplySnapshot(SnapshotMessage snapshot)
         {
             try
             {
-                // Десериализуем WorldState из сообщения
-                var newWorldState = JsonGameSerializer.Deserialize<WorldState>(snapshot.WorldDataPayload);
-                if (newWorldState == null)
-                {
-                    Debug.LogError("[CLIENT] Failed to deserialize snapshot");
-                    return;
-                }
-
-                // Получаем словарь из десериализованного состояния
-                var snapshotDict = newWorldState.CreateSnapshot();
+                // Десериализуем словарь из JSON
+                var snapshotDict = JsonGameSerializer.Deserialize<Dictionary<string, object>>(snapshot.WorldDataPayload);
 
                 // Применяем словарь к текущему состоянию
                 _worldState.ApplySnapshot(snapshotDict);
@@ -245,15 +235,24 @@ namespace Assets.Scripts.Network.NetCore
 
             try
             {
-                var patch = new PatchMessage
+                // Создаем ChangeData
+                var change = new ChangeData
                 {
                     Path = path,
                     OldValue = oldValue,
-                    NewValue = newValue
+                    NewValue = newValue,
+                    Timestamp = DateTime.UtcNow.Ticks,
+                    SourceClientId = Guid.Empty // Сервер заполнит
+                };
+
+                var patch = new PatchMessage
+                {
+                    ChangeData = change
                 };
 
                 Debug.Log($"[CLIENT] Sending patch: {path}: {oldValue} -> {newValue}");
 
+                // Используем MakePacket с объектом, а не с byte[]
                 var packet = MakePacket(MessageType.Patch, patch);
                 await _transport.SendAsync(Guid.Empty, packet, CancellationToken.None);
             }
@@ -265,18 +264,21 @@ namespace Assets.Scripts.Network.NetCore
 
         private ArraySegment<byte> MakePacket<T>(MessageType type, T message)
         {
-            var payload = JsonGameSerializer.Serialize(message);
+            // Используем новый метод сериализации в байты
+            byte[] payload = JsonGameSerializer.SerializeToBytes(message);
+
             var result = new byte[1 + 4 + payload.Length];
             result[0] = (byte)type;
+
             var len = payload.Length;
             result[1] = (byte)(len & 0xFF);
             result[2] = (byte)((len >> 8) & 0xFF);
             result[3] = (byte)((len >> 16) & 0xFF);
             result[4] = (byte)((len >> 24) & 0xFF);
-            Buffer.BlockCopy(payload, 0, result, 5, payload.Length);
+
+            System.Buffer.BlockCopy(payload, 0, result, 5, payload.Length);
             return new ArraySegment<byte>(result);
         }
-
         private Tuple<MessageType, byte[]> ParsePacket(ArraySegment<byte> data)
         {
             var array = data.Array;
@@ -291,6 +293,7 @@ namespace Assets.Scripts.Network.NetCore
             var payload = new byte[len];
             Buffer.BlockCopy(array, offset + 5, payload, 0, len);
 
+            // Возвращаем байты, а не строку
             return Tuple.Create(type, payload);
         }
     }

@@ -1,4 +1,5 @@
-﻿using System;
+﻿using Assets.Scripts.Network.NetCore;
+using System;
 using System.Collections;
 using UnityEngine;
 
@@ -55,8 +56,7 @@ namespace Assets.Shared.SyncSystem.Core
 
         public override void SetValueSilent(object value)
         {
-            var oldValue = _value;
-            _value = (T)Convert.ChangeType(value, typeof(T));
+            _value = JsonGameSerializer.ConvertValue<T>(value);
             _patched?.Invoke("", _value);
         }
 

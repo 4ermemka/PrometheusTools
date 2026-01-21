@@ -6,11 +6,7 @@ namespace Assets.Shared.Model.Extensions
     {
         public static Vector2Dto FromVector2(this Vector2 vector)
         {
-            return new Vector2Dto()
-            {
-                x = vector.x,
-                y = vector.y
-            };
+            return new Vector2Dto(vector.x, vector.y);
         }
 
         public static Vector2 FromVector2DTO(this Vector2Dto vector)
