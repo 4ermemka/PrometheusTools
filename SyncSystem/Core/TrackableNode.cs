@@ -165,7 +165,7 @@ namespace Assets.Shared.SyncSystem.Core
             return snapshot;
         }
 
-        private void BuildSnapshot(string currentPath, Dictionary<string, object> snapshot)
+        public virtual void BuildSnapshot(string currentPath, Dictionary<string, object> snapshot)
         {
             foreach (var kvp in _trackableFields)
             {

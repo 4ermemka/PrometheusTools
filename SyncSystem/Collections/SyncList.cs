@@ -1,4 +1,4 @@
-using Assets.Scripts.Network.NetCore;
+п»їusing Assets.Scripts.Network.NetCore;
 using Assets.Shared.SyncSystem.Core;
 using System;
 using System.Collections;
@@ -8,6 +8,7 @@ using UnityEngine;
 
 namespace Assets.Shared.SyncSystem.Collections
 {
+
     public class SyncList<T> : TrackableNode, IList<T>
     {
         private readonly List<T> _items = new List<T>();
@@ -27,8 +28,8 @@ namespace Assets.Shared.SyncSystem.Collections
                     _items[index] = value;
                     SubscribeToElement(value, index);
 
-                    // Генерируем патч для замены элемента
-                    OnChanged($"replace/{index}", oldValue, value);
+                    // Р“РµРЅРµСЂРёСЂСѓРµРј РїР°С‚С‡ РґР»СЏ Р·Р°РјРµРЅС‹ СЌР»РµРјРµРЅС‚Р°
+                    OnChanged($"[{index}]", oldValue, value);
                 }
             }
         }
@@ -112,7 +113,6 @@ namespace Assets.Shared.SyncSystem.Collections
                         elementPath += $".{path}";
                     }
 
-                    // Пробрасываем изменение элемента наверх
                     OnChanged(elementPath, oldVal, newVal);
                 };
 
@@ -152,92 +152,122 @@ namespace Assets.Shared.SyncSystem.Collections
 
         #endregion
 
-        #region Переопределение ApplyPatch для обработки специфичных путей
+        #region РџРµСЂРµРѕРїСЂРµРґРµР»РµРЅРёРµ ApplyPatch Рё ApplyPatchInternal
 
-        public override void ApplyPatch(string path, object value)
+        public override void ApplySnapshot(Dictionary<string, object> snapshot)
         {
-            if (string.IsNullOrEmpty(path))
+            if (snapshot == null) return;
+
+            // РћС‡РёС‰Р°РµРј С‚РµРєСѓС‰РёР№ СЃРїРёСЃРѕРє
+            Clear();
+
+            // РћРїСЂРµРґРµР»СЏРµРј РјР°РєСЃРёРјР°Р»СЊРЅС‹Р№ РёРЅРґРµРєСЃ, С‡С‚РѕР±С‹ Р·РЅР°С‚СЊ, СЃРєРѕР»СЊРєРѕ СЌР»РµРјРµРЅС‚РѕРІ РЅСѓР¶РЅРѕ РІРѕСЃСЃС‚Р°РЅРѕРІРёС‚СЊ
+            int maxIndex = -1;
+            var indexPaths = new List<string>();
+
+            foreach (var key in snapshot.Keys)
             {
-                // Снапшот всего списка
-                ApplySnapshot(value);
-                return;
-            }
-
-            // Разбираем путь на части
-            var dotIndex = path.IndexOf('.');
-
-            if (dotIndex >= 0)
-            {
-                // Путь содержит точку: [index].property или operation.property
-                var firstPart = path.Substring(0, dotIndex);
-                var remainingPath = path.Substring(dotIndex + 1);
-
-                if (firstPart.StartsWith("[") && firstPart.EndsWith("]"))
+                if (key.EndsWith("]"))
                 {
-                    // Обращение к элементу списка: [index].property
-                    ProcessElementPropertyPath(firstPart, remainingPath, value);
-                }
-                else
-                {
-                    // Неожиданный формат, передаем базовому классу
-                    base.ApplyPatch(path, value);
-                }
-            }
-            else
-            {
-                // Путь без точек - операция над списком или индекс
-                ProcessListOperation(path, value);
-            }
-        }
-
-        private void ProcessElementPropertyPath(string indexPart, string propertyPath, object value)
-        {
-            // Извлекаем индекс из строки вида "[index]"
-            var indexStr = indexPart.Substring(1, indexPart.Length - 2);
-            if (int.TryParse(indexStr, out int index) && index >= 0 && index < _items.Count)
-            {
-                var element = _items[index];
-                if (element is ITrackable trackable)
-                {
-                    trackable.ApplyPatch(propertyPath, value);
-                }
-            }
-        }
-
-        private void ProcessListOperation(string operationPath, object value)
-        {
-            // Если путь начинается с "[" - обращение к элементу
-            if (operationPath.StartsWith("[") && operationPath.Contains("]"))
-            {
-                int bracketIndex = operationPath.IndexOf(']');
-                string indexStr = operationPath.Substring(1, bracketIndex - 1);
-
-                if (int.TryParse(indexStr, out int index) && index >= 0 && index < _items.Count)
-                {
-                    if (bracketIndex == operationPath.Length - 1)
+                    // РС‰РµРј РїСѓС‚СЊ СЃ РёРЅРґРµРєСЃРѕРј: "Players[0]", "Players[0].Health", "Players[1].Position.x"
+                    var bracketIndex = key.LastIndexOf('[');
+                    if (bracketIndex != -1)
                     {
-                        // [index] - замена элемента
-                        ApplyReplaceOperation(index, value);
-                    }
-                    else if (operationPath[bracketIndex + 1] == '/')
-                    {
-                        // [index]/operation - операция над элементом (нестандартный случай)
-                        var operation = operationPath.Substring(bracketIndex + 2);
-                        ApplyElementOperation(index, operation, value);
+                        var closeBracketIndex = key.IndexOf(']', bracketIndex);
+                        if (closeBracketIndex != -1)
+                        {
+                            var indexStr = key.Substring(bracketIndex + 1, closeBracketIndex - bracketIndex - 1);
+                            if (int.TryParse(indexStr, out int index))
+                            {
+                                maxIndex = Math.Max(maxIndex, index);
+                                indexPaths.Add(key);
+                            }
+                        }
                     }
                 }
             }
-            else if (operationPath.Contains("/"))
+
+            // РЎРѕР·РґР°РµРј СЌР»РµРјРµРЅС‚С‹ РґР»СЏ РєР°Р¶РґРѕРіРѕ РёРЅРґРµРєСЃР°
+            for (int i = 0; i <= maxIndex; i++)
             {
-                // Операция над списком
-                ApplyCollectionOperation(operationPath, value);
+                // РС‰РµРј РІСЃРµ РїСѓС‚Рё, РЅР°С‡РёРЅР°СЋС‰РёРµСЃСЏ СЃ С‚РµРєСѓС‰РµРіРѕ РёРЅРґРµРєСЃР°
+                var indexKey = $"[{i}]";
+                var elementPaths = indexPaths.Where(p => p.Contains($"[{i}]")).ToList();
+
+                if (elementPaths.Count > 0)
+                {
+                    // РЎРѕР·РґР°РµРј СЌР»РµРјРµРЅС‚
+                    T item = CreateItemFromSnapshot(snapshot, elementPaths, i);
+                    if (item != null)
+                    {
+                        // Р”РѕР±Р°РІР»СЏРµРј РІ СЃРїРёСЃРѕРє (Р±РµР· РіРµРЅРµСЂР°С†РёРё СЃРѕР±С‹С‚РёР№)
+                        AddSilent(item);
+                    }
+                }
+            }
+
+            // РЈРІРµРґРѕРјР»СЏРµРј РѕР± РёР·РјРµРЅРµРЅРёРё
+            OnPatched("", _items);
+        }
+
+        // РљР»СЋС‡РµРІРѕРµ РёР·РјРµРЅРµРЅРёРµ: РїРµСЂРµРѕРїСЂРµРґРµР»СЏРµРј ApplyPatchInternal РґР»СЏ РѕР±СЂР°Р±РѕС‚РєРё РёРЅРґРµРєСЃРѕРІ
+        protected override void ApplyPatchInternal(string[] pathParts, int currentIndex, object value)
+        {
+            if (currentIndex >= pathParts.Length) return;
+
+            var currentPart = pathParts[currentIndex];
+
+            // РџСЂРѕРІРµСЂСЏРµРј, СЏРІР»СЏРµС‚СЃСЏ Р»Рё С‚РµРєСѓС‰Р°СЏ С‡Р°СЃС‚СЊ РёРЅРґРµРєСЃРѕРј СЃРїРёСЃРєР° (С„РѕСЂРјР°С‚ "[index]")
+            if (currentPart.StartsWith("[") && currentPart.EndsWith("]"))
+            {
+                // РР·РІР»РµРєР°РµРј РёРЅРґРµРєСЃ РёР· СЃС‚СЂРѕРєРё РІРёРґР° "[index]"
+                string indexStr = currentPart.Substring(1, currentPart.Length - 2);
+                if (!int.TryParse(indexStr, out int elementIndex))
+                {
+                    Debug.LogError($"SyncList: Invalid index format: {currentPart}");
+                    return;
+                }
+
+                // РџСЂРѕРІРµСЂСЏРµРј РіСЂР°РЅРёС†С‹
+                if (elementIndex < 0 || elementIndex >= _items.Count)
+                {
+                    Debug.LogError($"SyncList: Index out of range: {elementIndex} (Count: {_items.Count})");
+                    return;
+                }
+
+                // РџРѕР»СѓС‡Р°РµРј СЌР»РµРјРµРЅС‚
+                var element = _items[elementIndex];
+
+                // Р•СЃР»Рё СЌС‚Рѕ РїРѕСЃР»РµРґРЅСЏСЏ С‡Р°СЃС‚СЊ РїСѓС‚Рё - Р·Р°РјРµРЅСЏРµРј СЌР»РµРјРµРЅС‚
+                if (currentIndex == pathParts.Length - 1)
+                {
+                    ApplyReplaceOperation(elementIndex, value);
+                    return;
+                }
+
+                // Р•СЃР»Рё СЌР»РµРјРµРЅС‚ ITrackable, РїРµСЂРµРґР°РµРј РµРјСѓ РѕСЃС‚Р°РІС€РёР№СЃСЏ РїСѓС‚СЊ
+                if (element is ITrackable trackableElement)
+                {
+                    // Р¤РѕСЂРјРёСЂСѓРµРј РѕСЃС‚Р°РІС€РёР№СЃСЏ РїСѓС‚СЊ
+                    var remainingPath = string.Join(".", pathParts, currentIndex + 1, pathParts.Length - currentIndex - 1);
+                    trackableElement.ApplyPatch(remainingPath, value);
+                }
+            }
+            else if (currentPart.Contains("/"))
+            {
+                // Р­С‚Рѕ РѕРїРµСЂР°С†РёСЏ РЅР°Рґ СЃРїРёСЃРєРѕРј (add/0, remove/2 Рё С‚.Рґ.)
+                ApplyCollectionOperation(currentPart, value);
             }
             else
             {
-                // Простой путь - передаем базовому классу
-                base.ApplyPatch(operationPath, value);
+                // РќРµРёР·РІРµСЃС‚РЅС‹Р№ С„РѕСЂРјР°С‚ - РїСЂРѕР±СѓРµРј Р±Р°Р·РѕРІСѓСЋ РѕР±СЂР°Р±РѕС‚РєСѓ
+                base.ApplyPatchInternal(pathParts, currentIndex, value);
             }
         }
+
+        #endregion
+
+        #region РџСЂРёРјРµРЅРµРЅРёРµ РѕРїРµСЂР°С†РёР№ (РІС‹Р·С‹РІР°СЋС‚СЃСЏ РёР· СЃРµС‚Рё)
 
         private void ApplyCollectionOperation(string operationPath, object value)
         {
@@ -286,21 +316,6 @@ namespace Assets.Shared.SyncSystem.Collections
             }
         }
 
-        private void ApplyElementOperation(int index, string operation, object value)
-        {
-            // Операции над конкретным элементом
-            switch (operation)
-            {
-                case "replace":
-                    ApplyReplaceOperation(index, value);
-                    break;
-            }
-        }
-
-        #endregion
-
-        #region Применение операций (вызываются из сети)
-
         private void ApplyAddOperation(string[] parts, object value)
         {
             int index = _items.Count;
@@ -314,7 +329,6 @@ namespace Assets.Shared.SyncSystem.Collections
             ReindexElementsFrom(index + 1);
             SubscribeToElement(item, index);
 
-            // Уведомляем о применении патча из сети
             OnPatched($"add/{index}", item);
         }
 
@@ -372,7 +386,6 @@ namespace Assets.Shared.SyncSystem.Collections
 
                 _items.Insert(adjustedToIndex, item);
 
-                // Переподписываем затронутые элементы
                 int start = Math.Min(fromIndex, adjustedToIndex);
                 int end = Math.Max(fromIndex, adjustedToIndex);
                 for (int i = start; i <= end; i++)
@@ -414,77 +427,114 @@ namespace Assets.Shared.SyncSystem.Collections
 
         #endregion
 
-        #region Снапшоты
+        #region РЎРЅР°РїС€РѕС‚С‹
 
         public override Dictionary<string, object> CreateSnapshot()
         {
             var snapshot = new Dictionary<string, object>();
-            var items = new List<object>();
+            BuildSnapshot("", snapshot);
+            return snapshot;
+        }
 
-            foreach (var item in _items)
+        private T CreateItemFromSnapshot(Dictionary<string, object> snapshot, List<string> elementPaths, int index)
+        {
+            // Р”Р»СЏ РїСЂРѕСЃС‚С‹С… С‚РёРїРѕРІ
+            if (typeof(T).IsPrimitive || typeof(T) == typeof(string) || typeof(T) == typeof(Vector2Dto))
             {
-                if (item is ITrackable trackable)
+                // РС‰РµРј РїСЂСЏРјРѕРµ Р·РЅР°С‡РµРЅРёРµ РґР»СЏ СЌС‚РѕРіРѕ РёРЅРґРµРєСЃР°
+                var directKey = $"[{index}]";
+                if (snapshot.TryGetValue(directKey, out var value))
                 {
-                    // Для ITrackable объектов используем их собственные снапшоты
-                    if (trackable is TrackableNode node)
+                    return JsonGameSerializer.ConvertValue<T>(value);
+                }
+            }
+            // Р”Р»СЏ TrackableNode С‚РёРїРѕРІ
+            else if (typeof(TrackableNode).IsAssignableFrom(typeof(T)))
+            {
+                try
+                {
+                    T item = Activator.CreateInstance<T>();
+                    if (item is TrackableNode node)
                     {
-                        items.Add(node.CreateSnapshot());
+                        // РЎРѕР·РґР°РµРј РїРѕРґ-СЃРЅР°РїС€РѕС‚ РґР»СЏ СЌС‚РѕРіРѕ СЌР»РµРјРµРЅС‚Р°
+                        var elementSnapshot = new Dictionary<string, object>();
+
+                        foreach (var path in elementPaths)
+                        {
+                            // РџСЂРµРѕР±СЂР°Р·СѓРµРј "Players[0].Health" в†’ "Health"
+                            var afterBracket = path.Substring(path.IndexOf(']') + 1);
+                            if (afterBracket.StartsWith("."))
+                            {
+                                var propertyPath = afterBracket.Substring(1);
+                                elementSnapshot[propertyPath] = snapshot[path];
+                            }
+                        }
+
+                        node.ApplySnapshot(elementSnapshot);
+                        return item;
                     }
-                    else
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError($"Failed to create item from snapshot for index {index}: {ex.Message}");
+                }
+            }
+
+            return default(T);
+        }
+
+        // Р’СЃРїРѕРјРѕРіР°С‚РµР»СЊРЅС‹Р№ РјРµС‚РѕРґ РґР»СЏ РґРѕР±Р°РІР»РµРЅРёСЏ Р±РµР· РіРµРЅРµСЂР°С†РёРё СЃРѕР±С‹С‚РёР№
+        private void AddSilent(T item)
+        {
+            int index = _items.Count;
+            _items.Add(item);
+            SubscribeToElement(item, index);
+        }
+        
+        public override void BuildSnapshot(string currentPath, Dictionary<string, object> snapshot)
+        {
+            // РЎРѕС…СЂР°РЅСЏРµРј СЌР»РµРјРµРЅС‚С‹ СЃРїРёСЃРєР° СЃ РёРЅРґРµРєСЃР°РјРё
+            for (int i = 0; i < _items.Count; i++)
+            {
+                var element = _items[i];
+                var elementPath = string.IsNullOrEmpty(currentPath) ? $"[{i}]" : $"{currentPath}[{i}]";
+
+                if (element is TrackableNode node)
+                {
+                    // Р РµРєСѓСЂСЃРёРІРЅРѕ СЃРѕС…СЂР°РЅСЏРµРј TrackableNode СЌР»РµРјРµРЅС‚С‹
+                    node.BuildSnapshot(elementPath, snapshot);
+                }
+                else if (element is ITrackable trackable)
+                {
+                    // Р”Р»СЏ РїСЂРѕСЃС‚С‹С… ITrackable СЃРѕС…СЂР°РЅСЏРµРј РёС… Р·РЅР°С‡РµРЅРёРµ
+                    // РќРѕ СЌС‚Рѕ СЃР»РѕР¶РЅРѕ Р±РµР· РѕР±С‰РµРіРѕ РјРµС‚РѕРґР° GetValue РІ ITrackable
+                    // РџРѕСЌС‚РѕРјСѓ РёСЃРїРѕР»СЊР·СѓРµРј РѕР±С…РѕРґРЅРѕР№ РїСѓС‚СЊ С‡РµСЂРµР· JSON
+                    try
                     {
-                        // Для простых ITrackable сериализуем в JSON
-                        items.Add(JsonGameSerializer.Serialize(item));
+                        string json = JsonGameSerializer.Serialize(element);
+                        snapshot[elementPath] = json;
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.LogError($"Failed to serialize element at index {i}: {ex.Message}");
                     }
                 }
                 else
                 {
-                    items.Add(item);
+                    // РџСЂРѕСЃС‚С‹Рµ С‚РёРїС‹ СЃРѕС…СЂР°РЅСЏРµРј РєР°Рє РµСЃС‚СЊ
+                    snapshot[elementPath] = element;
                 }
             }
 
-            snapshot["_items"] = items;
-            return snapshot;
-        }
-
-        public override void ApplySnapshot(Dictionary<string, object> snapshot)
-        {
-            if (snapshot == null) return;
-
-            // Очищаем текущий список
-            Clear();
-
-            if (snapshot.TryGetValue("_items", out var itemsObj) && itemsObj is List<object> itemsList)
-            {
-                foreach (var itemObj in itemsList)
-                {
-                    if (itemObj is Dictionary<string, object> itemDict)
-                    {
-                        // Это снапшот TrackableNode
-                        // В реальности нужно создать объект типа T и применить к нему снапшот
-                        // Это сложно без рефлексии, поэтому для простоты пропускаем
-                        Debug.LogWarning("SyncList: Cannot deserialize TrackableNode from snapshot without reflection");
-                    }
-                    else
-                    {
-                        // Простой объект
-                        T item = ConvertValue<T>(itemObj);
-                        Add(item);
-                    }
-                }
-            }
-        }
-
-        private void ApplySnapshot(object snapshot)
-        {
-            if (snapshot is Dictionary<string, object> dict)
-            {
-                ApplySnapshot(dict);
-            }
+            // РўР°РєР¶Рµ СЃРѕС…СЂР°РЅСЏРµРј РѕРїРµСЂР°С†РёРѕРЅРЅС‹Рµ РїРѕР»СЏ СЃРїРёСЃРєР°, РµСЃР»Рё РѕРЅРё РµСЃС‚СЊ
+            // РќР°РїСЂРёРјРµСЂ, СЃС‡РµС‚С‡РёРє СЌР»РµРјРµРЅС‚РѕРІ РёР»Рё РґСЂСѓРіРёРµ РјРµС‚Р°РґР°РЅРЅС‹Рµ
+            var countPath = string.IsNullOrEmpty(currentPath) ? "_count" : $"{currentPath}._count";
+            snapshot[countPath] = _items.Count;
         }
 
         #endregion
 
-        #region GetValue (для обратной совместимости)
+        #region GetValue
 
         public override object GetValue(string path)
         {
@@ -493,26 +543,37 @@ namespace Assets.Shared.SyncSystem.Collections
                 return this;
             }
 
-            if (path.StartsWith("[") && path.Contains("]"))
-            {
-                int bracketIndex = path.IndexOf(']');
-                string indexStr = path.Substring(1, bracketIndex - 1);
+            // Р Р°Р·Р±РёРІР°РµРј РїСѓС‚СЊ РЅР° С‡Р°СЃС‚Рё
+            var parts = path.Split('.');
+            return GetValueInternal(parts, 0);
+        }
 
-                if (int.TryParse(indexStr, out int index) && index >= 0 && index < _items.Count)
+        private object GetValueInternal(string[] pathParts, int currentIndex)
+        {
+            if (currentIndex >= pathParts.Length) return null;
+
+            var currentPart = pathParts[currentIndex];
+
+            // РџСЂРѕРІРµСЂСЏРµРј, СЏРІР»СЏРµС‚СЃСЏ Р»Рё С‚РµРєСѓС‰Р°СЏ С‡Р°СЃС‚СЊ РёРЅРґРµРєСЃРѕРј
+            if (currentPart.StartsWith("[") && currentPart.EndsWith("]"))
+            {
+                string indexStr = currentPart.Substring(1, currentPart.Length - 2);
+                if (!int.TryParse(indexStr, out int index) || index < 0 || index >= _items.Count)
                 {
-                    if (bracketIndex == path.Length - 1)
-                    {
-                        return _items[index];
-                    }
-                    else if (path[bracketIndex + 1] == '.')
-                    {
-                        string propertyPath = path.Substring(bracketIndex + 2);
-                        var item = _items[index];
-                        if (item is ITrackable trackable)
-                        {
-                            return trackable.GetValue(propertyPath);
-                        }
-                    }
+                    return null;
+                }
+
+                var element = _items[index];
+
+                if (currentIndex == pathParts.Length - 1)
+                {
+                    return element;
+                }
+
+                if (element is ITrackable trackable)
+                {
+                    var remainingPath = string.Join(".", pathParts, currentIndex + 1, pathParts.Length - currentIndex - 1);
+                    return trackable.GetValue(remainingPath);
                 }
             }
 
