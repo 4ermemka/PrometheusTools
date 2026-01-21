@@ -2,14 +2,12 @@ using Newtonsoft.Json;
 using System;
 
 [Serializable]
-public class Vector2Dto
+public struct Vector2Dto
 {
     [JsonProperty("x")]
     public float x { get; set; }
     [JsonProperty("y")]
     public float y { get; set; }
-
-    public Vector2Dto() { }
 
     public Vector2Dto(float x, float y)
     {

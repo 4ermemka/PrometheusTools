@@ -15,7 +15,7 @@ namespace Assets.Shared.Model
 
         public BoxData()
         {
-            Position.Value = Vector2Dto.Zero();
+            Position.Value = Vector2Dto.One();
         }
     }
 }
