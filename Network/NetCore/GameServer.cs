@@ -1,7 +1,4 @@
-﻿using Assets.Scripts.Network.NetTCP;
-using Assets.Shared.ChangeDetector;
-using Assets.Shared.ChangeDetector.Base.Mapping;
-using Assets.Shared.Network.NetCore;
+﻿using Assets.Shared.Network.NetCore;
 using Assets.Shared.Network.NetCore.Messages;
 using System;
 using System.Collections.Generic;
@@ -20,7 +17,6 @@ namespace Assets.Scripts.Network.NetCore
     public sealed class GameServer : IDisposable
     {
         private readonly ITransport _transport;
-        private readonly IGameSerializer _serializer;
 
         // Простейшее хранение подключённых клиентов
         private readonly HashSet<Guid> _clients = new HashSet<Guid>();
@@ -28,10 +24,9 @@ namespace Assets.Scripts.Network.NetCore
         // Первый подключившийся клиент считаем авторитетным источником снапшотов
         private Guid _hostClientId = Guid.Empty;
 
-        public GameServer(ITransport transport, IGameSerializer serializer)
+        public GameServer(ITransport transport)
         {
-            _transport = transport;
-            _serializer = serializer;
+            _transport = transport ?? throw new ArgumentNullException(nameof(transport));
 
             _transport.Connected += OnClientConnected;
             _transport.Disconnected += OnClientDisconnected;
@@ -47,6 +42,7 @@ namespace Assets.Scripts.Network.NetCore
         private async void OnClientConnected(Guid clientId)
         {
             _clients.Add(clientId);
+            Debug.Log($"[SERVER] Client connected: {clientId}");
 
             if (_hostClientId == Guid.Empty)
             {
@@ -55,21 +51,23 @@ namespace Assets.Scripts.Network.NetCore
             }
 
             var isHost = clientId == _hostClientId;
-            var handshake = new HandshakeMessage { IsHost = isHost };
-            var payload = _serializer.Serialize(handshake);
-            var packet = MakePacket(MessageType.Handshake, payload);
+            var handshake = new HandshakeMessage
+            {
+                IsHost = isHost,
+                ClientId = clientId,
+                ServerTime = DateTime.UtcNow.Ticks
+            };
 
+            var packet = MakePacket(MessageType.Handshake, handshake);
             await _transport.SendAsync(clientId, packet, CancellationToken.None);
         }
 
         private void OnClientDisconnected(Guid clientId)
         {
             _clients.Remove(clientId);
-
             Debug.Log($"[SERVER] Client disconnected: {clientId}");
 
-            // Если отключился хост, можно либо сбросить _hostClientId,
-            // либо попытаться назначить нового (из оставшихся клиентов).
+            // Если отключился хост, назначаем нового
             if (_hostClientId == clientId)
             {
                 _hostClientId = _clients.FirstOrDefault();
@@ -81,59 +79,89 @@ namespace Assets.Scripts.Network.NetCore
         {
             var (type, payload) = ParsePacket(data);
 
+            Debug.Log($"[SERVER] Received packet type={type} from client={clientId}");
+
             switch (type)
             {
                 case MessageType.SnapshotRequest:
                     {
-                        var request = _serializer.Deserialize<SnapshotRequestMessage>(payload);
-                        if (request == null) return;
+                        var request = JsonGameSerializer.Deserialize<SnapshotRequestMessage>(payload);
+                        if (request == null)
+                        {
+                            Debug.LogError($"[SERVER] Failed to deserialize SnapshotRequest from {clientId}");
+                            return;
+                        }
 
                         request.RequestorClientId = clientId;
-
-                        var fwdPayload = _serializer.Serialize(request);
-                        var packet = MakePacket(MessageType.SnapshotRequest, fwdPayload);
+                        Debug.Log($"[SERVER] SnapshotRequest from {clientId}, forwarding to host {_hostClientId}");
 
                         if (_hostClientId != Guid.Empty && _clients.Contains(_hostClientId))
+                        {
+                            var packet = MakePacket(MessageType.SnapshotRequest, request);
                             await _transport.SendAsync(_hostClientId, packet, CancellationToken.None);
-
+                        }
                         break;
                     }
 
                 case MessageType.Snapshot:
                     {
-                        var snapshot = _serializer.Deserialize<SnapshotMessage>(payload);
-                        if (snapshot == null) return;
-
-                        var targetId = snapshot.TargetClientId;
-                        if (targetId != Guid.Empty && _clients.Contains(targetId))
+                        var snapshot = JsonGameSerializer.Deserialize<SnapshotMessage>(payload);
+                        if (snapshot == null)
                         {
-                            var packet = MakePacket(MessageType.Snapshot, payload);
-                            await _transport.SendAsync(targetId, packet, CancellationToken.None);
+                            Debug.LogError($"[SERVER] Failed to deserialize Snapshot from {clientId}");
+                            return;
                         }
 
+                        var targetId = snapshot.TargetClientId;
+                        Debug.Log($"[SERVER] Snapshot for {targetId} from {clientId}");
+
+                        if (targetId != Guid.Empty && _clients.Contains(targetId))
+                        {
+                            var packet = MakePacket(MessageType.Snapshot, snapshot);
+                            await _transport.SendAsync(targetId, packet, CancellationToken.None);
+                        }
                         break;
                     }
 
                 case MessageType.Patch:
                     {
-                        // Патчи сервером не применяются, только рассылаются всем, кроме отправителя.
-                        var packet = new ArraySegment<byte>(data.Array, data.Offset, data.Count);
+                        var patch = JsonGameSerializer.Deserialize<PatchMessage>(payload);
+                        if (patch == null)
+                        {
+                            Debug.LogError($"[SERVER] Failed to deserialize Patch from {clientId}");
+                            return;
+                        }
 
-                        if (_transport is TcpHostTransport hostTransport)
-                            await hostTransport.BroadcastExceptAsync(clientId, packet, CancellationToken.None);
-                        else
-                            await _transport.BroadcastAsync(packet, CancellationToken.None);
+                        if (patch.ChangeData != null)
+                        {
+                            patch.ChangeData.SourceClientId = clientId;
+                        }
 
+                        Debug.Log($"[SERVER] Patch from {clientId}: {patch.ChangeData?.Path}");
+                        await BroadcastPatchExceptAsync(clientId, patch);
                         break;
                     }
+            }
+        }
 
-                case MessageType.Handshake:
-                    {
-                        // При необходимости можно что-то сделать с Handshake,
-                        // пока просто игнорируем или логируем.
-                        Debug.Log($"[SERVER] Handshake from {clientId}");
-                        break;
-                    }
+        private async Task BroadcastPatchExceptAsync(Guid exceptClientId, PatchMessage patch)
+        {
+            // Сериализуем патч один раз
+            var packet = MakePacket(MessageType.Patch, patch);
+
+            // Рассылаем всем клиентам, кроме отправителя
+            foreach (var clientId in _clients)
+            {
+                if (clientId == exceptClientId) continue;
+
+                try
+                {
+                    await _transport.SendAsync(clientId, packet, CancellationToken.None);
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError($"[SERVER] Failed to send patch to {clientId}: {ex.Message}");
+                }
             }
         }
 
@@ -143,6 +171,23 @@ namespace Assets.Scripts.Network.NetCore
             _transport.Disconnected -= OnClientDisconnected;
             _transport.DataReceived -= OnDataReceived;
             _transport.Dispose();
+        }
+
+        private ArraySegment<byte> MakePacket<T>(MessageType type, T message)
+        {
+            byte[] payload = JsonGameSerializer.SerializeToBytes(message);
+
+            var result = new byte[1 + 4 + payload.Length];
+            result[0] = (byte)type;
+
+            var len = payload.Length;
+            result[1] = (byte)(len & 0xFF);
+            result[2] = (byte)((len >> 8) & 0xFF);
+            result[3] = (byte)((len >> 16) & 0xFF);
+            result[4] = (byte)((len >> 24) & 0xFF);
+
+            System.Buffer.BlockCopy(payload, 0, result, 5, payload.Length);
+            return new ArraySegment<byte>(result);
         }
 
         private Tuple<MessageType, byte[]> ParsePacket(ArraySegment<byte> data)
@@ -160,22 +205,6 @@ namespace Assets.Scripts.Network.NetCore
             Buffer.BlockCopy(array, offset + 5, payload, 0, len);
 
             return Tuple.Create(type, payload);
-        }
-
-        private ArraySegment<byte> MakePacket(MessageType type, byte[] payload)
-        {
-            var result = new byte[1 + 4 + payload.Length];
-            result[0] = (byte)type;
-
-            var len = payload.Length;
-            result[1] = (byte)(len & 0xFF);
-            result[2] = (byte)((len >> 8) & 0xFF);
-            result[3] = (byte)((len >> 16) & 0xFF);
-            result[4] = (byte)((len >> 24) & 0xFF);
-
-            Buffer.BlockCopy(payload, 0, result, 5, payload.Length);
-
-            return new ArraySegment<byte>(result);
         }
     }
 }

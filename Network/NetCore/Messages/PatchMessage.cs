@@ -1,29 +1,24 @@
-﻿using Assets.Shared.ChangeDetector;
-using System.Collections.Generic;
+﻿using Assets.Shared.SyncSystem.Core;
+using System;
 
 namespace Assets.Scripts.Network.NetCore
 {
-    /// <summary>
-    /// Сетевое сообщение-патч: путь до поля и новое значение.
-    /// Отправляется от клиента к хосту и от хоста ко всем клиентам.
-    /// </summary>
-    public sealed class PatchMessage
+    // PatchMessage - сообщение с патчем
+    [Serializable]
+    public class PatchMessage
     {
-        /// <summary>
-        /// Путь до изменённого поля в дереве WorldState.
-        /// Например: [ "Counters", "[1]", "Value" ].
-        /// </summary>
-        public List<FieldPathSegment> Path { get; set; }
+        public ChangeData ChangeData { get; set; }
+    }
 
-        /// <summary>
-        /// Новое значение для указанного поля (после применения патча).
-        /// </summary>
+    // ChangeData - изменение одного поля
+    [Serializable]
+    public class ChangeData
+    {
+        public string Path { get; set; }
+        public object OldValue { get; set; }
         public object NewValue { get; set; }
-
-        public PatchMessage()
-        {
-            Path = new List<FieldPathSegment>();
-        }
+        public long Timestamp { get; set; } = DateTime.UtcNow.Ticks;
+        public Guid SourceClientId { get; set; }
     }
 
 }
