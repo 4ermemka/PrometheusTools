@@ -101,6 +101,7 @@ namespace Assets.Shared.SyncSystem.Core
                 {
                     // Конечный элемент - применяем патч здесь
                     trackable.ApplyPatch("", value);
+                    OnPatched(pathParts[index], value);
                 }
                 else if (CanHandleRecursivePath(trackable, pathParts, index))
                 {
@@ -190,6 +191,7 @@ namespace Assets.Shared.SyncSystem.Core
                 {
                     ApplyPatch(kvp.Key, kvp.Value);
                 }
+                OnPatched($"{this.GetType().Name}", snapshot);
             }
 
         // Новый метод для получения ITrackable по имени поля

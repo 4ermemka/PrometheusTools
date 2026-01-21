@@ -204,10 +204,24 @@ namespace Assets.Shared.SyncSystem.Collections
             // Если индекс выходит за пределы - создаем элементы до нужного индекса
             while (elementIndex >= _items.Count)
             {
-                AddSilent(default(T));
+                // В режиме снапшота создаем элемент по умолчанию
+                T newElement = CreateDefaultElement();
+                AddSilent(newElement);
             }
 
             var element = _items[elementIndex];
+
+            // Если элемент null (возможно, был создан как заглушка), пытаемся создать экземпляр
+            if (element == null)
+            {
+                element = CreateElementFromValue(value, pathParts, currentIndex);
+                if (element != null)
+                {
+                    _items[elementIndex] = element;
+                    // Если элемент трекабельный - подписываемся на изменения
+                    SubscribeToElement(element, elementIndex);
+                }
+            }
 
             // Если это конечный путь - устанавливаем значение элемента
             if (currentIndex == pathParts.Length - 1)
@@ -217,10 +231,20 @@ namespace Assets.Shared.SyncSystem.Collections
                     // Если элемент трекабельный, применяем патч к нему (путь "")
                     trackableElement.ApplyPatch("", value);
                 }
+                else if (element != null)
+                {
+                    // Если элемент не трекабельный, но существует - заменяем его
+                    ReplaceElementSilently(elementIndex, value);
+                }
                 else
                 {
-                    // Если элемент простого типа - заменяем его
-                    ReplaceElementSilently(elementIndex, value);
+                    // Если элемент все еще null - создаем и устанавливаем
+                    var newElement = CreateElementFromValue(value, pathParts, currentIndex);
+                    if (newElement != null)
+                    {
+                        _items[elementIndex] = newElement;
+                        SubscribeToElement(newElement, elementIndex);
+                    }
                 }
                 return true;
             }
@@ -354,6 +378,83 @@ namespace Assets.Shared.SyncSystem.Collections
 
             _items.Clear();
             _elementChangeHandlers.Clear();
+        }
+
+        #endregion
+
+        #region Вспомогательные методы для создания элементов
+
+        // Метод для создания элемента по умолчанию
+        private T CreateDefaultElement()
+        {
+            if (typeof(T).IsValueType)
+            {
+                // Для значимых типов создаем default
+                return default(T);
+            }
+            else if (typeof(T).IsClass)
+            {
+                try
+                {
+                    // Пытаемся создать экземпляр через конструктор без параметров
+                    return Activator.CreateInstance<T>();
+                }
+                catch
+                {
+                    // Если не удается создать - возвращаем null
+                    return default(T);
+                }
+            }
+
+            return default(T);
+        }
+
+        // Метод для создания элемента на основе значения
+        private T CreateElementFromValue(object value, string[] pathParts, int currentIndex)
+        {
+            // Если value уже является T
+            if (value is T typedValue)
+            {
+                return typedValue;
+            }
+
+            // Если это TrackableNode и у нас есть информация о типе
+            if (typeof(TrackableNode).IsAssignableFrom(typeof(T)))
+            {
+                try
+                {
+                    T element = Activator.CreateInstance<T>();
+
+                    // Если у нас есть вложенные пути и элемент - TrackableNode
+                    if (currentIndex < pathParts.Length - 1 && element is TrackableNode node)
+                    {
+                        // Создаем временный словарь для применения патчей
+                        var tempSnapshot = new Dictionary<string, object>();
+                        var remainingPath = string.Join(".", pathParts, currentIndex + 1, pathParts.Length - currentIndex - 1);
+                        tempSnapshot[remainingPath] = value;
+
+                        // Применяем патч к новому элементу
+                        node.ApplySnapshot(tempSnapshot);
+                    }
+
+                    return element;
+                }
+                catch
+                {
+                    // Не удалось создать экземпляр
+                    return default(T);
+                }
+            }
+
+            // Для простых типов конвертируем значение
+            try
+            {
+                return JsonGameSerializer.ConvertValue<T>(value);
+            }
+            catch
+            {
+                return default(T);
+            }
         }
 
         #endregion
@@ -542,70 +643,109 @@ namespace Assets.Shared.SyncSystem.Collections
                     // Для простых типов сохраняем как есть
                     snapshot[elementPath] = element;
                 }
+                else
+                {
+                    // Для null элементов сохраняем null
+                    snapshot[elementPath] = null;
+                }
             }
         }
 
         public override void ApplySnapshot(Dictionary<string, object> snapshot)
         {
-            // Для снапшота мы очищаем список и применяем каждый патч
-            ClearSilent();
-
-            // Собираем все индексные пути из снапшота
-            var indexedPaths = new List<(int index, string path, object value)>();
-
-            foreach (var kvp in snapshot)
+            try
             {
-                if (TryParseIndexPath(kvp.Key, out int index, out string remainingPath))
+                // Очищаем список
+                ClearSilent();
+
+                // Собираем все индексные пути из снапшота
+                var indexedData = new Dictionary<int, List<KeyValuePair<string, object>>>();
+
+                foreach (var kvp in snapshot)
                 {
-                    indexedPaths.Add((index, remainingPath, kvp.Value));
-                }
-            }
-
-            // Группируем по индексам и создаем элементы
-            var groupedByIndex = indexedPaths.GroupBy(x => x.index);
-
-            foreach (var group in groupedByIndex.OrderBy(g => g.Key))
-            {
-                int index = group.Key;
-
-                // Создаем элемент по умолчанию
-                T element = default(T);
-
-                // Если есть возможность, создаем экземпляр
-                if (typeof(T).IsClass && typeof(T).GetConstructor(Type.EmptyTypes) != null)
-                {
-                    element = Activator.CreateInstance<T>();
-                }
-
-                // Добавляем элемент в список
-                while (_items.Count <= index)
-                {
-                    AddSilent(default(T));
-                }
-
-                // Заменяем элемент созданным
-                _items[index] = element;
-                if (element is ITrackable trackableElement)
-                {
-                    SubscribeToElement(element, index);
-                }
-
-                // Применяем все патчи для этого индекса
-                foreach (var item in group)
-                {
-                    if (!string.IsNullOrEmpty(item.path))
+                    if (TryParseIndexPath(kvp.Key, out int index, out string remainingPath))
                     {
-                        // Если есть вложенный путь
-                        if (element is ITrackable trackable)
+                        if (!indexedData.ContainsKey(index))
                         {
-                            trackable.ApplyPatch(item.path, item.value);
+                            indexedData[index] = new List<KeyValuePair<string, object>>();
                         }
+
+                        indexedData[index].Add(new KeyValuePair<string, object>(remainingPath, kvp.Value));
+                    }
+                }
+
+                // Обрабатываем данные по индексам
+                foreach (var kvp in indexedData.OrderBy(x => x.Key))
+                {
+                    int index = kvp.Key;
+                    var elementData = kvp.Value;
+
+                    // Создаем элемент
+                    T element = CreateElementForSnapshot(elementData);
+
+                    // Добавляем элемент в список
+                    while (_items.Count <= index)
+                    {
+                        AddSilent(default(T));
+                    }
+
+                    // Заменяем элемент (если уже есть) или устанавливаем
+                    if (index < _items.Count)
+                    {
+                        _items[index] = element;
                     }
                     else
                     {
-                        // Если путь пустой - это прямое значение элемента
-                        ReplaceElementSilently(index, item.value);
+                        AddSilent(element);
                     }
+
+                    // Подписываемся на изменения элемента
+                    SubscribeToElement(element, index);
+
+                    // Применяем данные к элементу
+                    ApplyDataToElement(element, elementData);
+                }
+
+                OnPatched($"{this.GetType().Name}", _items);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"ApplySnapshot exception: {ex.Message}: {ex.StackTrace}");
+            }
+
+            // Уведомляем об изменении всего списка
+        }
+
+        private T CreateElementForSnapshot(List<KeyValuePair<string, object>> elementData)
+        {
+            // Сначала ищем прямое значение элемента (путь "")
+            var directValue = elementData.FirstOrDefault(x => string.IsNullOrEmpty(x.Key));
+            if (!directValue.Equals(default(KeyValuePair<string, object>)))
+            {
+                // Если есть прямое значение, создаем элемент из него
+                return CreateElementFromValue(directValue.Value, new string[0], 0);
+            }
+
+            // Если нет прямого значения, создаем элемент по умолчанию
+            return CreateDefaultElement();
+        }
+
+        private void ApplyDataToElement(T element, List<KeyValuePair<string, object>> elementData)
+        {
+            if (element == null) return;
+
+            foreach (var data in elementData)
+            {
+                if (string.IsNullOrEmpty(data.Key))
+                {
+                    // Прямое значение элемента уже обработано при создании
+                    continue;
+                }
+
+                // Применяем патч к элементу
+                if (element is ITrackable trackable)
+                {
+                    trackable.ApplyPatch(data.Key, data.Value);
                 }
             }
         }
@@ -615,12 +755,14 @@ namespace Assets.Shared.SyncSystem.Collections
             index = -1;
             remainingPath = null;
 
+            // Ищем первый индекс в пути
             var parts = fullPath.Split('.');
             for (int i = 0; i < parts.Length; i++)
             {
-                if (parts[i].StartsWith("[") && parts[i].EndsWith("]"))
+                var part = parts[i];
+                if (part.StartsWith("[") && part.EndsWith("]"))
                 {
-                    string indexStr = parts[i].Substring(1, parts[i].Length - 2);
+                    string indexStr = part.Substring(1, part.Length - 2);
                     if (int.TryParse(indexStr, out index))
                     {
                         // Остаток пути после индекса
