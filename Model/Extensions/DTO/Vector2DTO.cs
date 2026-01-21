@@ -5,9 +5,9 @@ using System;
 public struct Vector2Dto
 {
     [JsonProperty("x")]
-    public float x { get; set; }
+    public float x;
     [JsonProperty("y")]
-    public float y { get; set; }
+    public float y;
 
     public Vector2Dto(float x, float y)
     {
