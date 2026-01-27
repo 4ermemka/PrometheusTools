@@ -7,19 +7,15 @@ public abstract class InputHandler : MonoBehaviour
 {
     private bool _isSubscribed = false;
 
-    protected virtual void Start()
+    protected virtual void OnEnable()
+    {
+        InputManager.OnStarted += SubscribeOnInputManagerStarted;
+    }
+
+    protected void SubscribeOnInputManagerStarted()
     {
         // Подписываемся при старте, если объект активен
         if (isActiveAndEnabled && !_isSubscribed)
-        {
-            SubscribeEvents();
-        }
-    }
-
-    protected virtual void OnEnable()
-    {
-        // Подписываемся только если еще не подписаны
-        if (!_isSubscribed)
         {
             SubscribeEvents();
         }

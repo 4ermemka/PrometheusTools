@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -7,6 +8,8 @@ using UnityEngine;
 /// </summary>
 public class InputManager : MonoBehaviour
 {
+    public static Action OnStarted;
+
     [Serializable]
     public class KeyAction
     {
@@ -35,14 +38,16 @@ public class InputManager : MonoBehaviour
 
     public static InputManager Instance { get; private set; }
 
-    void Awake()
+    private void Awake()
     {
-        if (Instance != null) Destroy(gameObject);
-        else
+        if (Instance == null)
         {
             Instance = this;
             Initialize();
+            DontDestroyOnLoad(gameObject);
+            OnStarted?.Invoke();
         }
+        else Destroy(gameObject);
     }
 
     void Initialize()
