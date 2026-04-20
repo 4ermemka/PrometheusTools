@@ -1,0 +1,41 @@
+// GrassPlacement.compute
+#pragma kernel CSMain
+
+struct GrassBlade
+{
+    float3 position;
+    float randomSeed;
+};
+
+float3 _AreaCenter;
+float2 _AreaSize; // x = ширина, y = длина
+int _GrassCount;
+
+RWStructuredBuffer<GrassBlade> _GrassBuffer;
+
+float randFloat(inout uint rngState)
+{
+    rngState = rngState * 747796405u + 2891336453u;
+    uint result = ((rngState >> ((rngState >> 28u) + 4u)) ^ rngState) * 277803737u;
+    result = (result >> 22u) ^ result;
+    return result / 4294967295.0;
+}
+
+[numthreads(64, 1, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _GrassCount)
+        return;
+
+    uint rngState = id.x;
+
+    // Равномерно в прямоугольнике
+    float x = (randFloat(rngState) * 2.0 - 1.0) * _AreaSize.x * 0.5;
+    float z = (randFloat(rngState) * 2.0 - 1.0) * _AreaSize.y * 0.5;
+    float y = _AreaCenter.y;
+
+    GrassBlade blade;
+    blade.position = _AreaCenter + float3(x, 0, z);
+    blade.randomSeed = randFloat(rngState);
+    _GrassBuffer[id.x] = blade;
+}
