@@ -12,7 +12,8 @@ GameObject:
   - component: {fileID: 8333769331130891287}
   - component: {fileID: 3427296290802309385}
   - component: {fileID: 2980922509337486658}
-  - component: {fileID: 182863596409124877}
+  - component: {fileID: 2783587080499219807}
+  - component: {fileID: 5070813997235279921}
   m_Layer: 0
   m_Name: Cell
   m_TagString: Untagged
@@ -30,7 +31,7 @@ Transform:
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
   m_LocalPosition: {x: 0, y: 0, z: 0}
-  m_LocalScale: {x: 0.09, y: 1, z: 0.09}
+  m_LocalScale: {x: 0.1, y: 1, z: 0.1}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 0}
@@ -114,7 +115,7 @@ MeshCollider:
   m_Convex: 0
   m_CookingOptions: 30
   m_Mesh: {fileID: 10209, guid: 0000000000000000e000000000000000, type: 0}
---- !u!114 &182863596409124877
+--- !u!114 &2783587080499219807
 MonoBehaviour:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
@@ -123,7 +124,27 @@ MonoBehaviour:
   m_GameObject: {fileID: 6312496128156839488}
   m_Enabled: 1
   m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 9cba2cc9e9f900d498c6a82c9ec453d4, type: 3}
+  m_Script: {fileID: 11500000, guid: 55b79da65140637478e4a2432cdae9bd, type: 3}
   m_Name: 
-  m_EditorClassIdentifier: Shared::GridCellView
-  mainRenderer: {fileID: 3427296290802309385}
+  m_EditorClassIdentifier: Shared::Selectable
+  _hiddenMaterial: {fileID: 0}
+--- !u!114 &5070813997235279921
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 6312496128156839488}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: b5d8195e3cefd564084703f1e76316a6, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Shared::GridCell
+  gridPosition: {x: 0, y: 0, z: 0}
+  worldY: 0
+  rotation: {x: 0, y: 0, z: 0, w: 1}
+  isValid: 0
+  neighborUp: {fileID: 0}
+  neighborDown: {fileID: 0}
+  neighborLeft: {fileID: 0}
+  neighborRight: {fileID: 0}

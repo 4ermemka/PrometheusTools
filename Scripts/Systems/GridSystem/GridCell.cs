@@ -1,42 +1,54 @@
+using System;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.EventSystems;
 
-[System.Serializable]
-public class GridCell
+[RequireComponent(typeof(Selectable))]
+public class GridCell : MonoBehaviour, IGridCell, IPointerEnterHandler, IPointerExitHandler, IPointerClickHandler
 {
-    // Глобальные координаты ячейки (привязаны к сетке мира)
-    public Vector3Int gridPosition { get; private set; }
+    // Собственные события, которые пробрасывают холдеру
+    public Action<IGridCell> OnCellPointerEnterEvent { get; set; }
+    public Action<IGridCell> OnCellPointerExitEvent { get; set; }
+    public Action<IGridCell> OnCellPointerClickEvent { get; set; }
 
-    // Ссылки на соседей по 4-м основным направлениям
-    public GridCell neighborUp { get; set; }
-    public GridCell neighborDown { get; set; }
-    public GridCell neighborLeft { get; set; }
-    public GridCell neighborRight { get; set; }
+    public void OnPointerEnter(PointerEventData eventData) => OnCellPointerEnterEvent?.Invoke(this);
+    public void OnPointerExit(PointerEventData eventData) => OnCellPointerExitEvent?.Invoke(this);
+    public void OnPointerClick(PointerEventData eventData) => OnCellPointerClickEvent?.Invoke(this);
 
-    // Удобное свойство для перебора всех соседей
-    public IEnumerable<GridCell> Neighbors
+    [SerializeField] private Vector3Int gridPosition;
+    [SerializeField] private float worldY;
+    [SerializeField] private Quaternion rotation = Quaternion.identity;
+    [SerializeField] private bool isValid;
+
+    // Единый список соседей (заполняется через SetNeighbors)
+    [SerializeField] private List<GridCell> neighbours = new();
+
+    public Vector3Int GridPosition => gridPosition;
+    public float WorldY => worldY;
+    public Quaternion Rotation => rotation;
+    public bool IsValid => isValid;
+
+    public IEnumerable<IGridCell> Neighbors => neighbours;
+
+    public ISelectable Selection => GetComponent<Selectable>();
+
+    public Vector3 GetWorldPosition(float cellSize) =>
+        new Vector3(gridPosition.x * cellSize, worldY, gridPosition.z * cellSize);
+
+    public void Initialize(Vector3Int pos, float y, Quaternion rot, bool valid)
     {
-        get
-        {
-            if (neighborUp != null) yield return neighborUp;
-            if (neighborDown != null) yield return neighborDown;
-            if (neighborLeft != null) yield return neighborLeft;
-            if (neighborRight != null) yield return neighborRight;
-        }
+        gridPosition = pos;
+        worldY = y;
+        rotation = rot;
+        isValid = valid;
+        name = $"Cell_{pos.x}_{pos.y}_{pos.z}";
     }
 
-    // Флаг, была ли ячейка успешно сгенерирована на объекте
-    public bool isValid { get; set; } = false;
-
-    public GridCell(Vector3Int gridPos)
+    // Новый метод: принимает список соседей (заменил старый SetNeighbors с 4 параметрами)
+    public void SetNeighbors(List<GridCell> newNeighbours)
     {
-        gridPosition = gridPos;
-    }
-
-    // Получает мировую позицию центра ячейки (для рендеринга, отладки)
-    public Vector3 GetWorldPosition()
-    {
-        // Предполагаем, что размер ячейки = 1. Центр находится в gridPosition.
-        return new Vector3(gridPosition.x, gridPosition.y, gridPosition.z);
+        neighbours.Clear();
+        if (newNeighbours != null)
+            neighbours.AddRange(newNeighbours);
     }
 }

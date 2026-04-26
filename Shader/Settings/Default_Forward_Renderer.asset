@@ -14,6 +14,8 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp-Editor::PixelateRenderFeature
   m_Active: 1
   settings:
+    pixelShader: {fileID: 4800000, guid: e5f6f913016402348af18ad842e25568, type: 3}
+    quantizeShader: {fileID: 4800000, guid: 54a1e751761a08f4880e1f86c32a18e4, type: 3}
     enablePixelate: 1
     pixelSize: 2
     enableQuantization: 1
@@ -52,9 +54,9 @@ MonoBehaviour:
     probeVolumeBlendStatesCS: {fileID: 0}
   m_RendererFeatures:
   - {fileID: -5100989527864777326}
-  - {fileID: 2292834200994175746}
   - {fileID: 2282322725893558786}
-  m_RendererFeatureMap: 92e5a1f40ca535b902db1fcf8ec8d11f02d2af4b6d70ac1f
+  - {fileID: 2292834200994175746}
+  m_RendererFeatureMap: 92e5a1f40ca535b902d2af4b6d70ac1f02db1fcf8ec8d11f
   m_UseNativeRenderPass: 0
   xrSystemData: {fileID: 0}
   postProcessData: {fileID: 11400000, guid: 41439944d30ece34e96484bdb6645b55, type: 2}
@@ -98,14 +100,19 @@ MonoBehaviour:
   m_Active: 1
   settings:
     pixelSize: 2
-    depthBias: 0.001
-    darkenAmount: 1
+    minDepthDifference: 0.0001
+    maxDepthDifference: 0.003
+    minDarkening: 0
+    maxDarkening: 0.9
     edgeSide: 1
+    modulateByLuminance: 1
+    luminanceModulationStrength: 1
+    minLuminance: 0.3
+    maxLuminance: 0.5
+    useStencilFilter: 0
+    stencilReference: 1
+    stencilCompare: 6
     depthPreview: 0
-    depthContrast: 1.02
-    depthBrightness: -0.01
-    modulateByLighting: 1
-    lightingModulationStrength: 1
     showInSceneView: 0
     renderPassEvent: 550
   sharedPixelationSettings: {fileID: 11400000, guid: 70f238b723d35964397fe85fda879e37, type: 2}
@@ -129,10 +136,13 @@ MonoBehaviour:
     useDepthFilter: 1
     brightenAmount: 1
     edgeWidth: 1
-    modulateByLuminance: 1
+    modulateByLuminance: 0
     luminanceContribution: 1
     minLuminance: 0.2
     maxLuminance: 0.9
+    useStencilFilter: 0
+    stencilReference: 1
+    stencilCompare: 6
     normalPreview: 0
     showInSceneView: 0
     renderPassEvent: 550

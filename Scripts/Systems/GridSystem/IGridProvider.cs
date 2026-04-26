@@ -1,18 +1,17 @@
-// IGridProvider.cs
+using System;
 using System.Collections.Generic;
 using UnityEngine;
 
 public interface IGridProvider
 {
-    /// <summary> Получить ячейку по мировым координатам. </summary>
-    GridCellData GetCellAt(Vector3 worldPosition);
+    public event Action<IGridCell> OnCellPointerEnter;
+    public event Action<IGridCell> OnCellPointerExit;
+    public event Action<IGridCell> OnCellPointerClick;
 
-    /// <summary> Получить все ячейки в радиусе (Манхэттен). </summary>
-    List<GridCellData> GetCellsInRadius(Vector3 worldCenter, float radius);
-
-    /// <summary> Все сгенерированные валидные ячейки. </summary>
-    IReadOnlyCollection<GridCellData> AllCells { get; }
-
-    /// <summary> Размер ячейки в единицах мира. </summary>
+    IGridCell GetCellAt(Vector3 worldPosition);
+    IGridCell GetClosestCell(Vector3 worldPosition);
+    List<IGridCell> GetCellsInRadius(Vector3 worldCenter, float radius);
+    List<IGridCell> GetNeighborsOfOrder(IGridCell cell, int order);
+    IReadOnlyCollection<IGridCell> AllCells { get; }
     float CellSize { get; }
 }
