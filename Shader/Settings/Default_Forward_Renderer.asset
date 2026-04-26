@@ -114,7 +114,7 @@ MonoBehaviour:
     stencilCompare: 6
     depthPreview: 0
     showInSceneView: 0
-    renderPassEvent: 550
+    renderPassEvent: 500
   sharedPixelationSettings: {fileID: 11400000, guid: 70f238b723d35964397fe85fda879e37, type: 2}
 --- !u!114 &2292834200994175746
 MonoBehaviour:
@@ -145,7 +145,7 @@ MonoBehaviour:
     stencilCompare: 6
     normalPreview: 0
     showInSceneView: 0
-    renderPassEvent: 550
+    renderPassEvent: 500
   sharedPixelationSettings: {fileID: 11400000, guid: 70f238b723d35964397fe85fda879e37, type: 2}
 --- !u!114 &4784779133327124469
 MonoBehaviour:

@@ -6,7 +6,7 @@ public class GridGenerator : MonoBehaviour
 {
     [Header("References")]
     [SerializeField] private Transform targetsContainer;
-    [SerializeField] private GridHolder gridHolder;
+    [SerializeField] private GridProvider gridHolder;
     [SerializeField] private GridCell cellPrefab;
     [SerializeField] private Transform cellsContainer;
 

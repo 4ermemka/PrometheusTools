@@ -4,7 +4,7 @@ using System.Linq;
 using UnityEditor;
 using UnityEngine;
 
-public class GridHolder : MonoBehaviour, IGridProvider, IPathFinder<GridCell>
+public class GridProvider : Manager, IGridProvider, IPathFinder<GridCell>
 {
     [SerializeField] private float cellSize = 1f;
     [SerializeField] private Transform cellsContainer;
