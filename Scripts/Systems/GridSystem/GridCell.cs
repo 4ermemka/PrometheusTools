@@ -42,6 +42,7 @@ public class GridCell : MonoBehaviour, IGridCell, IPointerEnterHandler, IPointer
         rotation = rot;
         isValid = valid;
         name = $"Cell_{pos.x}_{pos.y}_{pos.z}";
+        transform.rotation = rot;
     }
 
     // Новый метод: принимает список соседей (заменил старый SetNeighbors с 4 параметрами)

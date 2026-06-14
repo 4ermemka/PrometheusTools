@@ -100,13 +100,13 @@ MonoBehaviour:
   m_Active: 1
   settings:
     pixelSize: 2
-    minDepthDifference: 0.0001
+    minDepthDifference: 0.001
     maxDepthDifference: 0.003
     minDarkening: 0
     maxDarkening: 0.9
     edgeSide: 1
     modulateByLuminance: 1
-    luminanceModulationStrength: 1
+    luminanceModulationStrength: 0
     minLuminance: 0.3
     maxLuminance: 0.5
     useStencilFilter: 0
