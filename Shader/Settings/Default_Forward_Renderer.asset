@@ -11,7 +11,7 @@ MonoBehaviour:
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 7344871c0e284214ca35f64cb4d60d6c, type: 3}
   m_Name: PixelateRenderFeature
-  m_EditorClassIdentifier: Assembly-CSharp-Editor::PixelateRenderFeature
+  m_EditorClassIdentifier: Assembly-CSharp::PixelateRenderFeature
   m_Active: 1
   settings:
     pixelShader: {fileID: 4800000, guid: e5f6f913016402348af18ad842e25568, type: 3}
@@ -96,9 +96,10 @@ MonoBehaviour:
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: ea1b0c99d20cd5d4e9986747fe2a7a9b, type: 3}
   m_Name: PixelateDepthEdgeFeature
-  m_EditorClassIdentifier: Assembly-CSharp-Editor::PixelateDepthEdgeFeature
+  m_EditorClassIdentifier: Assembly-CSharp::PixelateDepthEdgeFeature
   m_Active: 1
   settings:
+    depthEdgeShader: {fileID: 4800000, guid: b239decd241d4ec499056cf7097649ad, type: 3}
     pixelSize: 2
     minDepthDifference: 0.001
     maxDepthDifference: 0.003
@@ -127,9 +128,10 @@ MonoBehaviour:
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: c3f7e3a04aa4c0245a3ce9beefe45204, type: 3}
   m_Name: PixelateNormalEdgeFeature
-  m_EditorClassIdentifier: Assembly-CSharp-Editor::PixelateNormalEdgeFeature
+  m_EditorClassIdentifier: Assembly-CSharp::PixelateNormalEdgeFeature
   m_Active: 1
   settings:
+    normalEdgeShader: {fileID: 4800000, guid: a13d9a0a945f4264bc087c4cf84bb1e4, type: 3}
     pixelSize: 2
     normalBias: 0.3
     depthThreshold: 0.0001

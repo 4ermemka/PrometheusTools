@@ -1,9 +1,7 @@
-﻿using Assets.Scripts.Network.NetCore;
 using System;
 
 namespace Assets.Shared.SyncSystem.Core
 {
-    // Конкретная реализация Sync<T>
     public class Sync<T> : SyncBase
     {
         private T _value;
@@ -30,11 +28,15 @@ namespace Assets.Shared.SyncSystem.Core
             get => _value;
             set
             {
-                if (!Equals(_value, value))
+                if (Equals(_value, value))
+                    return;
+
+                var oldValue = _value;
+                _value = value;
+                ValueChanged?.Invoke(oldValue, _value);
+
+                if (!SyncMutationScope.IsSilent)
                 {
-                    var oldValue = _value;
-                    _value = value;
-                    ValueChanged?.Invoke(oldValue, _value);
                     _changed?.Invoke("", oldValue, _value);
                 }
             }
@@ -54,7 +56,7 @@ namespace Assets.Shared.SyncSystem.Core
 
         public override void SetValueSilent(object value)
         {
-            _value = JsonGameSerializer.ConvertValue<T>(value);
+            _value = SyncValueConverter.ConvertValue<T>(value);
             _patched?.Invoke("", _value);
         }
 

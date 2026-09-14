@@ -1,9 +1,9 @@
-﻿﻿using Assets.Scripts.Network.NetCore;
 using Assets.Shared.SyncSystem.Core;
 using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using UnityEngine;
 
 namespace Assets.Shared.SyncSystem.Collections
@@ -11,7 +11,24 @@ namespace Assets.Shared.SyncSystem.Collections
     public class SyncList<T> : TrackableNode, IList<T>
     {
         private readonly List<T> _items = new List<T>();
-        private readonly Dictionary<T, Action<string, object, object>> _elementChangeHandlers = new Dictionary<T, Action<string, object, object>>();
+        private readonly Dictionary<ITrackable, Action<string, object, object>> _elementChangeHandlers =
+            new Dictionary<ITrackable, Action<string, object, object>>(ReferenceEqualityComparer<ITrackable>.Instance);
+
+        private sealed class ReferenceEqualityComparer<TReference> : IEqualityComparer<TReference>
+            where TReference : class
+        {
+            public static readonly ReferenceEqualityComparer<TReference> Instance = new ReferenceEqualityComparer<TReference>();
+
+            public bool Equals(TReference x, TReference y)
+            {
+                return ReferenceEquals(x, y);
+            }
+
+            public int GetHashCode(TReference obj)
+            {
+                return RuntimeHelpers.GetHashCode(obj);
+            }
+        }
 
         #region IList<T> Implementation
 
@@ -27,7 +44,7 @@ namespace Assets.Shared.SyncSystem.Collections
                     _items[index] = value;
                     SubscribeToElement(value, index);
 
-                    OnChanged($"[{index}]", oldValue, value);
+                    RaiseChanged($"[{index}]", oldValue, value);
                 }
             }
         }
@@ -40,7 +57,7 @@ namespace Assets.Shared.SyncSystem.Collections
             int index = _items.Count;
             _items.Add(item);
             SubscribeToElement(item, index);
-            OnChanged($"add/{index}", null, item);
+            RaiseChanged($"add/{index}", null, item);
         }
 
         public void Insert(int index, T item)
@@ -48,7 +65,7 @@ namespace Assets.Shared.SyncSystem.Collections
             _items.Insert(index, item);
             ReindexElementsFrom(index + 1);
             SubscribeToElement(item, index);
-            OnChanged($"insert/{index}", null, item);
+            RaiseChanged($"insert/{index}", null, item);
         }
 
         public bool Remove(T item)
@@ -68,7 +85,7 @@ namespace Assets.Shared.SyncSystem.Collections
             UnsubscribeFromElement(oldValue);
             _items.RemoveAt(index);
             ReindexElementsFrom(index);
-            OnChanged($"remove/{index}", oldValue, null);
+            RaiseChanged($"remove/{index}", oldValue, null);
         }
 
         public void Clear()
@@ -83,7 +100,7 @@ namespace Assets.Shared.SyncSystem.Collections
             _items.Clear();
             _elementChangeHandlers.Clear();
 
-            OnChanged("clear", oldItems, null);
+            RaiseChanged("clear", oldItems, null);
         }
 
         public bool Contains(T item) => _items.Contains(item);
@@ -111,25 +128,22 @@ namespace Assets.Shared.SyncSystem.Collections
                         elementPath += $".{path}";
                     }
 
-                    OnChanged(elementPath, oldVal, newVal);
+                    RaiseChanged(elementPath, oldVal, newVal);
                 };
 
                 trackable.Changed += handler;
-                _elementChangeHandlers[element] = handler;
+                _elementChangeHandlers[trackable] = handler;
             }
         }
 
         private void UnsubscribeFromElement(T element)
         {
-            if (element == null || !_elementChangeHandlers.TryGetValue(element, out var handler))
+            if (!(element is ITrackable trackable) || !_elementChangeHandlers.TryGetValue(trackable, out var handler))
                 return;
 
-            if (element is ITrackable trackable)
-            {
-                trackable.Changed -= handler;
-            }
+            trackable.Changed -= handler;
 
-            _elementChangeHandlers.Remove(element);
+            _elementChangeHandlers.Remove(trackable);
         }
 
         private void ReindexElementsFrom(int startIndex)
@@ -137,12 +151,9 @@ namespace Assets.Shared.SyncSystem.Collections
             for (int i = startIndex; i < _items.Count; i++)
             {
                 var element = _items[i];
-                if (element != null && _elementChangeHandlers.TryGetValue(element, out var oldHandler))
+                if (element is ITrackable trackable && _elementChangeHandlers.TryGetValue(trackable, out var oldHandler))
                 {
-                    if (element is ITrackable trackable)
-                    {
-                        trackable.Changed -= oldHandler;
-                    }
+                    trackable.Changed -= oldHandler;
                     SubscribeToElement(element, i);
                 }
             }
@@ -361,7 +372,7 @@ namespace Assets.Shared.SyncSystem.Collections
             var oldValue = _items[index];
             UnsubscribeFromElement(oldValue);
 
-            T newItem = JsonGameSerializer.ConvertValue<T>(value);
+            T newItem = SyncValueConverter.ConvertValue<T>(value);
             _items[index] = newItem;
             SubscribeToElement(newItem, index);
 
@@ -449,7 +460,7 @@ namespace Assets.Shared.SyncSystem.Collections
             // Для простых типов конвертируем значение
             try
             {
-                return JsonGameSerializer.ConvertValue<T>(value);
+                return SyncValueConverter.ConvertValue<T>(value);
             }
             catch
             {
@@ -536,12 +547,9 @@ namespace Assets.Shared.SyncSystem.Collections
                 for (int i = start; i <= end; i++)
                 {
                     var elem = _items[i];
-                    if (elem != null && _elementChangeHandlers.TryGetValue(elem, out var oldHandler))
+                    if (elem is ITrackable trackable && _elementChangeHandlers.TryGetValue(trackable, out var oldHandler))
                     {
-                        if (elem is ITrackable trackable)
-                        {
-                            trackable.Changed -= oldHandler;
-                        }
+                        trackable.Changed -= oldHandler;
                         SubscribeToElement(elem, i);
                     }
                 }
@@ -567,7 +575,7 @@ namespace Assets.Shared.SyncSystem.Collections
 
         private TValue ConvertValue<TValue>(object value)
         {
-            return JsonGameSerializer.ConvertValue<TValue>(value);
+            return SyncValueConverter.ConvertValue<TValue>(value);
         }
 
         #endregion
@@ -783,6 +791,14 @@ namespace Assets.Shared.SyncSystem.Collections
         }
 
         #endregion
+
+        private void RaiseChanged(string path, object oldValue, object newValue)
+        {
+            if (!SyncMutationScope.IsSilent)
+            {
+                OnChanged(path, oldValue, newValue);
+            }
+        }
 
         public override string ToString() => $"SyncList<{typeof(T).Name}>[{Count}]";
     }

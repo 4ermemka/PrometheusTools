@@ -6,9 +6,8 @@ using System.Threading.Tasks;
 namespace Assets.Scripts.Network.NetCore
 {
     /// <summary>
-    /// Абстракция сетевого транспорта.
-    /// DataReceived всегда выдаёт один логический пакет:
-    /// [type:1][len:4][payload:len].
+    /// Transport abstraction for the game protocol. Implementations may use TCP,
+    /// WebSocket, relay services, or another channel, but must emit complete packets.
     /// </summary>
     public interface ITransport : IDisposable
     {
@@ -16,15 +15,11 @@ namespace Assets.Scripts.Network.NetCore
         event Action<Guid> Disconnected;
         event Action<Guid, ArraySegment<byte>> DataReceived;
 
+        IReadOnlyCollection<Guid> Clients { get; }
+
         Task StartAsync(string address, int port, CancellationToken token = default);
         Task StopAsync(CancellationToken token = default);
-
         Task SendAsync(Guid clientId, ArraySegment<byte> payload, CancellationToken token = default);
-
         Task BroadcastAsync(ArraySegment<byte> payload, CancellationToken token = default);
-
-        // Новое: список известных клиентов (для серверной реализации)
-        IReadOnlyCollection<Guid> Clients { get; }
     }
 }
-

@@ -22,12 +22,17 @@ Shader "Hidden/Pixelate"
                 o.uv = GetFullScreenTriangleTexCoord(input.vertexID);
                 return o;
             }
+
+            float2 GetPixelBlockCenter(float2 uv) {
+                float pixelSize = max(_PixelSize, 1.0);
+                float2 stepUV = min(pixelSize * _BlitTexture_TexelSize.xy, float2(1.0, 1.0));
+                float2 blockMin = floor(uv / stepUV) * stepUV;
+                blockMin = min(max(blockMin, float2(0.0, 0.0)), max(float2(0.0, 0.0), float2(1.0, 1.0) - stepUV));
+                return saturate(blockMin + stepUV * 0.5);
+            }
+
             float4 Frag(Varyings i) : SV_Target {
-                float2 texelCount = _BlitTexture_TexelSize.zw;
-                float2 stepUV = 1.0 / (texelCount / _PixelSize);
-                float2 pixelatedUV = floor(i.uv / stepUV) * stepUV;
-                pixelatedUV = min(pixelatedUV, 1.0 - stepUV);
-                float2 sampleUV = pixelatedUV + stepUV * 0.5;
+                float2 sampleUV = GetPixelBlockCenter(i.uv);
                 float4 col = SAMPLE_TEXTURE2D(_BlitTexture, sampler_BlitTexture, sampleUV);
                 col.a = 1.0;
                 return col;

@@ -1,10 +1,7 @@
-﻿using Assets.Shared.Model;
-using Assets.Shared.Network.NetCore;
 using Assets.Shared.SyncSystem.Core;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
@@ -12,45 +9,43 @@ using UnityEngine;
 namespace Assets.Scripts.Network.NetCore
 {
     /// <summary>
-    /// Клиент, который:
-    /// - держит ссылку на общий WorldState (TrackableNode),
-    /// - слушает локальные изменения (Changed) и шлёт патчи на сервер,
-    /// - принимает патчи/снапшоты с сервера и применяет их к WorldState.
-    /// WorldState сам по себе ничего не знает о сети и визуале.
+    /// Binds a TrackableNode state tree to a transport. Local Changed events become
+    /// patches, while server messages are queued and applied from Unity's main thread.
     /// </summary>
     public sealed class GameClient : IDisposable
     {
         private readonly ITransport _transport;
-        private readonly WorldState _worldState;          // WorldState : TrackableNode
+        private readonly TrackableNode _state;
+        private readonly ConcurrentQueue<Action> _mainThreadActions = new ConcurrentQueue<Action>();
+        private readonly HashSet<Guid> _pendingLocalPatchIds = new HashSet<Guid>();
+        private readonly object _pendingLock = new object();
 
-        // Очередь входящих патчей, применяемых на главном потоке.
-        private readonly ConcurrentQueue<PatchMessage> _incomingPatches = new();
-
-        // Очередь действий, которые нужно выполнить на главном потоке (снапшоты и т.п.).
-        private readonly ConcurrentQueue<Action> _mainThreadActions = new();
+        private long _clientSequence;
+        private long _lastAppliedServerSequence;
+        private bool _disposed;
 
         public event Action ConnectedToHost;
         public event Action DisconnectedFromHost;
 
-        public GameClient(ITransport transport, WorldState worldState)
+        public Guid ClientId { get; private set; } = Guid.Empty;
+        public bool IsSnapshotProvider { get; private set; }
+        public bool IsConnected { get; private set; }
+
+        public GameClient(ITransport transport, TrackableNode state)
         {
             _transport = transport ?? throw new ArgumentNullException(nameof(transport));
-            _worldState = worldState ?? throw new ArgumentNullException(nameof(worldState));
+            _state = state ?? throw new ArgumentNullException(nameof(state));
 
             _transport.Connected += OnConnected;
             _transport.Disconnected += OnDisconnected;
             _transport.DataReceived += OnDataReceived;
 
-            // Локальные изменения WorldState → патчи на сервер
-            _worldState.Changed += OnLocalWorldChanged;
+            _state.Changed += OnLocalStateChanged;
         }
 
-        /// <summary>
-        /// Подключение к серверу.
-        /// После успешного подключения отправляем SnapshotRequest.
-        /// </summary>
         public async Task ConnectAsync(string address, int port, CancellationToken ct)
         {
+            ThrowIfDisposed();
             await _transport.StartAsync(address, port, ct);
         }
 
@@ -58,10 +53,10 @@ namespace Assets.Scripts.Network.NetCore
         {
             var request = new SnapshotRequestMessage
             {
-                RequestorClientId = Guid.Empty // сервер сам проставит реальный id
+                RequestorClientId = Guid.Empty
             };
 
-            var packet = MakePacket(MessageType.SnapshotRequest, request);
+            var packet = NetworkPacketCodec.Pack(MessageType.SnapshotRequest, request);
 
             try
             {
@@ -69,59 +64,21 @@ namespace Assets.Scripts.Network.NetCore
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[CLIENT] RequestSnapshotAsync failed: {ex}");
+                Debug.LogError($"[CLIENT] Snapshot request failed: {ex}");
             }
         }
 
-        public async Task DisconnectAsync(CancellationToken ct = default)
+        public Task DisconnectAsync(CancellationToken ct = default)
         {
-            await _transport.StopAsync(ct);
-        }
-
-        public void Dispose()
-        {
-            _worldState.Changed -= OnLocalWorldChanged;
-
-            _transport.Connected -= OnConnected;
-            _transport.Disconnected -= OnDisconnected;
-            _transport.DataReceived -= OnDataReceived;
-
-            _transport.Dispose();
-        }
-
-        private void OnConnected(Guid _)
-        {
-            ConnectedToHost?.Invoke();
-        }
-
-        private void OnDisconnected(Guid _)
-        {
-            DisconnectedFromHost?.Invoke();
+            return _transport.StopAsync(ct);
         }
 
         /// <summary>
-        /// Вызывается из MonoBehaviour.Update на главном потоке.
-        /// Применяем все накопленные патчи и выполняем отложенные действия.
-        /// </summary>
-        /// <summary>
-        /// Вызывается из MonoBehaviour.Update на главном потоке.
-        /// Применяем все накопленные патчи и выполняем отложенные действия.
+        /// Must be called from MonoBehaviour.Update. All received state mutations are
+        /// applied here so TrackableNode and Unity-facing code stay on the main thread.
         /// </summary>
         public void Update()
         {
-            // 1. Применяем входящие патчи (Position и любые другие поля WorldState)
-            while (_incomingPatches.TryDequeue(out var patch))
-            {
-                if (patch?.ChangeData == null) continue;
-
-                Debug.Log($"[GameClient] Applying patch: {patch.ChangeData.Path}: {patch.ChangeData.OldValue} -> {patch.ChangeData.NewValue}");
-
-                // Ключевое изменение: передаем путь и новое значение
-                // Sync<T>.SetValueSilent сам разберется с типами
-                _worldState.ApplyPatch(patch.ChangeData.Path, patch.ChangeData.NewValue);
-            }
-
-            // 2. Выполняем отложенные действия (например, применение снапшота)
             while (_mainThreadActions.TryDequeue(out var action))
             {
                 try
@@ -135,74 +92,114 @@ namespace Assets.Scripts.Network.NetCore
             }
         }
 
-        /// <summary>
-        /// Callback TCP‑транспорта. НЕ главный поток.
-        /// Здесь только раскладываем сообщения по очередям.
-        /// </summary>
-        /// <summary>
-        /// Callback TCP-транспорта. НЕ главный поток.
-        /// Здесь только раскладываем сообщения по очередям.
-        /// </summary>
-        private void OnDataReceived(Guid _, ArraySegment<byte> data)
+        private void OnConnected(Guid _)
         {
-            var (type, payload) = ParsePacket(data);
-
-            Debug.Log($"[CLIENT] recv packet type={type}, len={payload.Length}");
-
-            switch (type)
-            {
-                case MessageType.SnapshotRequest:
-                    {
-                        // Используем новый метод десериализации из байтов
-                        var request = JsonGameSerializer.Deserialize<SnapshotRequestMessage>(payload);
-                        if (request == null) return;
-
-                        _mainThreadActions.Enqueue(() => HandleSnapshotRequest(request));
-                        break;
-                    }
-
-                case MessageType.Snapshot:
-                    {
-                        var snapshot = JsonGameSerializer.Deserialize<SnapshotMessage>(payload);
-                        if (snapshot == null) return;
-
-                        _mainThreadActions.Enqueue(() => ApplySnapshot(snapshot));
-                        break;
-                    }
-
-                case MessageType.Patch:
-                    {
-                        var patch = JsonGameSerializer.Deserialize<PatchMessage>(payload);
-                        if (patch == null) return;
-
-                        _incomingPatches.Enqueue(patch);
-                        break;
-                    }
-            }
+            IsConnected = true;
+            ConnectedToHost?.Invoke();
         }
 
-        private async void HandleSnapshotRequest(SnapshotRequestMessage request)
+        private void OnDisconnected(Guid _)
         {
+            IsConnected = false;
+            ClientId = Guid.Empty;
+            IsSnapshotProvider = false;
+            DisconnectedFromHost?.Invoke();
+        }
+
+        private void OnDataReceived(Guid _, ArraySegment<byte> data)
+        {
+            if (!NetworkPacketCodec.TryUnpack(data, out var type, out var payload, out var error))
+            {
+                Debug.LogWarning($"[CLIENT] Dropped invalid packet: {error}");
+                return;
+            }
+
             try
             {
-                // Получаем снапшот текущего состояния
-                var snapshotDict = _worldState.CreateSnapshot();
-
-                // Создаем сообщение со снапшотом
-                var snapshot = new SnapshotMessage
+                switch (type)
                 {
-                    TargetClientId = request.RequestorClientId,
-                    WorldDataPayload = JsonGameSerializer.Serialize(snapshotDict)
-                };
+                    case MessageType.Handshake:
+                    {
+                        var handshake = JsonGameSerializer.Deserialize<HandshakeMessage>(payload);
+                        if (handshake != null)
+                        {
+                            _mainThreadActions.Enqueue(() => ApplyHandshake(handshake));
+                        }
+                        break;
+                    }
 
-                var packet = MakePacket(MessageType.Snapshot, snapshot);
-                await _transport.SendAsync(Guid.Empty, packet, CancellationToken.None);
+                    case MessageType.SnapshotRequest:
+                    {
+                        var request = JsonGameSerializer.Deserialize<SnapshotRequestMessage>(payload);
+                        if (request != null)
+                        {
+                            _mainThreadActions.Enqueue(() => HandleSnapshotRequest(request));
+                        }
+                        break;
+                    }
 
-                Debug.Log($"[CLIENT-HOST] Snapshot sent to {request.RequestorClientId}");
+                    case MessageType.Snapshot:
+                    {
+                        var snapshot = JsonGameSerializer.Deserialize<SnapshotMessage>(payload);
+                        if (snapshot != null)
+                        {
+                            _mainThreadActions.Enqueue(() => ApplySnapshot(snapshot));
+                        }
+                        break;
+                    }
+
+                    case MessageType.Patch:
+                    {
+                        var patch = JsonGameSerializer.Deserialize<PatchMessage>(payload);
+                        if (patch != null)
+                        {
+                            _mainThreadActions.Enqueue(() => ApplyPatch(patch));
+                        }
+                        break;
+                    }
+
+                    default:
+                        Debug.LogWarning($"[CLIENT] Unsupported packet type {type}");
+                        break;
+                }
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[CLIENT-HOST] HandleSnapshotRequest failed: {ex}");
+                Debug.LogError($"[CLIENT] Failed to parse {type}: {ex}");
+            }
+        }
+
+        private void ApplyHandshake(HandshakeMessage handshake)
+        {
+            ClientId = handshake.ClientId;
+            IsSnapshotProvider = handshake.IsHost;
+            Debug.Log($"[CLIENT] Handshake: client={ClientId}, snapshotProvider={IsSnapshotProvider}");
+        }
+
+        private void HandleSnapshotRequest(SnapshotRequestMessage request)
+        {
+            _ = SendSnapshotResponseAsync(request);
+        }
+
+        private async Task SendSnapshotResponseAsync(SnapshotRequestMessage request)
+        {
+            try
+            {
+                var snapshot = new SnapshotMessage
+                {
+                    TargetClientId = request.RequestorClientId,
+                    WorldDataPayload = JsonGameSerializer.Serialize(_state.CreateSnapshot()),
+                    Version = DateTime.UtcNow.Ticks.ToString()
+                };
+
+                var packet = NetworkPacketCodec.Pack(MessageType.Snapshot, snapshot);
+                await _transport.SendAsync(Guid.Empty, packet, CancellationToken.None);
+
+                Debug.Log($"[CLIENT] Snapshot sent to {request.RequestorClientId}");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[CLIENT] Snapshot response failed: {ex}");
             }
         }
 
@@ -210,91 +207,143 @@ namespace Assets.Scripts.Network.NetCore
         {
             try
             {
-                // Десериализуем словарь из JSON
-                var snapshotDict = JsonGameSerializer.Deserialize<Dictionary<string, object>>(snapshot.WorldDataPayload);
-
-                // Применяем словарь к текущему состоянию
-                _worldState.ApplySnapshot(snapshotDict);
-
-                Debug.Log("[CLIENT] Snapshot applied successfully.");
+                var snapshotData = JsonGameSerializer.Deserialize<Dictionary<string, object>>(snapshot.WorldDataPayload);
+                _state.ApplySnapshot(snapshotData);
+                Debug.Log("[CLIENT] Snapshot applied.");
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[CLIENT] ApplySnapshot failed: {ex}");
+                Debug.LogError($"[CLIENT] Snapshot apply failed: {ex}");
             }
         }
 
-        /// <summary>
-        /// Локальное изменение WorldState → отправка патча на сервер.
-        /// WorldState теперь использует string path, object oldValue, object newValue.
-        /// </summary>
-        private async void OnLocalWorldChanged(string path, object oldValue, object newValue)
+        private void ApplyPatch(PatchMessage patch)
         {
-            if (_transport == null)
+            var change = patch.ChangeData;
+            if (change == null || string.IsNullOrEmpty(change.Path))
                 return;
 
+            if (change.ServerSequence > 0 && change.ServerSequence <= _lastAppliedServerSequence)
+            {
+                Debug.LogWarning($"[CLIENT] Dropped duplicate/outdated patch #{change.ServerSequence}: {change.Path}");
+                return;
+            }
+
+            var isOwnPendingPatch = TryAcknowledgeLocalPatch(change);
+            if (change.ServerSequence > 0)
+            {
+                _lastAppliedServerSequence = change.ServerSequence;
+            }
+
+            // Index-based list operations are not idempotent. The local mutation has
+            // already changed this client, so its authoritative echo is only an ack.
+            if (isOwnPendingPatch && IsCollectionOperationPath(change.Path))
+            {
+                Debug.Log($"[CLIENT] Ack local collection patch #{change.ServerSequence}: {change.Path}");
+                return;
+            }
+
+            Debug.Log($"[CLIENT] Apply patch #{change.ServerSequence}: {change.Path}");
+            _state.ApplyPatch(change.Path, change.NewValue);
+        }
+
+        private void OnLocalStateChanged(string path, object oldValue, object newValue)
+        {
+            if (!IsConnected)
+                return;
+
+            var patchId = Guid.NewGuid();
+            var change = new ChangeData
+            {
+                PatchId = patchId,
+                Path = path,
+                OldValue = oldValue,
+                NewValue = newValue,
+                Timestamp = DateTime.UtcNow.Ticks,
+                ClientSequence = Interlocked.Increment(ref _clientSequence),
+                SourceClientId = ClientId
+            };
+
+            lock (_pendingLock)
+            {
+                _pendingLocalPatchIds.Add(patchId);
+            }
+
+            _ = SendPatchAsync(new PatchMessage { ChangeData = change });
+        }
+
+        private async Task SendPatchAsync(PatchMessage patch)
+        {
             try
             {
-                // Создаем ChangeData
-                var change = new ChangeData
-                {
-                    Path = path,
-                    OldValue = oldValue,
-                    NewValue = newValue,
-                    Timestamp = DateTime.UtcNow.Ticks,
-                    SourceClientId = Guid.Empty // Сервер заполнит
-                };
-
-                var patch = new PatchMessage
-                {
-                    ChangeData = change
-                };
-
-                Debug.Log($"[CLIENT] Sending patch: {path}: {oldValue} -> {newValue}");
-
-                // Используем MakePacket с объектом, а не с byte[]
-                var packet = MakePacket(MessageType.Patch, patch);
+                var packet = NetworkPacketCodec.Pack(MessageType.Patch, patch);
                 await _transport.SendAsync(Guid.Empty, packet, CancellationToken.None);
+                Debug.Log($"[CLIENT] Sent patch #{patch.ChangeData.ClientSequence}: {patch.ChangeData.Path}");
             }
             catch (Exception ex)
             {
+                lock (_pendingLock)
+                {
+                    _pendingLocalPatchIds.Remove(patch.ChangeData.PatchId);
+                }
+
                 Debug.LogError($"[CLIENT] Failed to send patch: {ex}");
             }
         }
 
-        private ArraySegment<byte> MakePacket<T>(MessageType type, T message)
+        private bool TryAcknowledgeLocalPatch(ChangeData change)
         {
-            // Используем новый метод сериализации в байты
-            byte[] payload = JsonGameSerializer.SerializeToBytes(message);
+            if (change.PatchId == Guid.Empty)
+                return false;
 
-            var result = new byte[1 + 4 + payload.Length];
-            result[0] = (byte)type;
-
-            var len = payload.Length;
-            result[1] = (byte)(len & 0xFF);
-            result[2] = (byte)((len >> 8) & 0xFF);
-            result[3] = (byte)((len >> 16) & 0xFF);
-            result[4] = (byte)((len >> 24) & 0xFF);
-
-            System.Buffer.BlockCopy(payload, 0, result, 5, payload.Length);
-            return new ArraySegment<byte>(result);
+            lock (_pendingLock)
+            {
+                return _pendingLocalPatchIds.Remove(change.PatchId);
+            }
         }
-        private Tuple<MessageType, byte[]> ParsePacket(ArraySegment<byte> data)
+
+        private static bool IsCollectionOperationPath(string path)
         {
-            var array = data.Array;
-            var offset = data.Offset;
+            var parts = path.Split('.');
+            for (var i = 0; i < parts.Length; i++)
+            {
+                var part = parts[i];
+                if (part == "clear"
+                    || part.StartsWith("add/", StringComparison.Ordinal)
+                    || part.StartsWith("insert/", StringComparison.Ordinal)
+                    || part.StartsWith("remove/", StringComparison.Ordinal)
+                    || part.StartsWith("move/", StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
 
-            var type = (MessageType)array[offset];
-            var len = array[offset + 1]
-                      | (array[offset + 2] << 8)
-                      | (array[offset + 3] << 16)
-                      | (array[offset + 4] << 24);
+            return false;
+        }
 
-            var payload = new byte[len];
-            Buffer.BlockCopy(array, offset + 5, payload, 0, len);
+        private void ThrowIfDisposed()
+        {
+            if (_disposed)
+                throw new ObjectDisposedException(nameof(GameClient));
+        }
 
-            // Возвращаем байты, а не строку
-            return Tuple.Create(type, payload);
+        public void Dispose()
+        {
+            if (_disposed)
+                return;
+
+            _disposed = true;
+
+            _state.Changed -= OnLocalStateChanged;
+            _transport.Connected -= OnConnected;
+            _transport.Disconnected -= OnDisconnected;
+            _transport.DataReceived -= OnDataReceived;
+            _transport.Dispose();
+
+            lock (_pendingLock)
+            {
+                _pendingLocalPatchIds.Clear();
+            }
         }
     }
 }

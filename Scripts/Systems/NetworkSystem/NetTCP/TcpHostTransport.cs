@@ -7,14 +7,13 @@ using System.Net;
 using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
+using UnityEngine;
 
 namespace Assets.Scripts.Network.NetTCP
 {
     /// <summary>
-    /// TCP-транспорт для хоста. Реализует length-prefixed протокол:
-    /// [type:1][len:4][payload:len].
-    /// Для каждого клиента поднимается отдельный цикл чтения,
-    /// который собирает целые пакеты и поднимает DataReceived.
+    /// TCP host transport. It exposes complete framed packets:
+    /// [type:1][payloadLength:4][payload].
     /// </summary>
     public sealed class TcpHostTransport : ITransport
     {
@@ -22,19 +21,14 @@ namespace Assets.Scripts.Network.NetTCP
         public event Action<Guid> Disconnected;
         public event Action<Guid, ArraySegment<byte>> DataReceived;
 
-        private readonly ConcurrentDictionary<Guid, TcpClient> _clients =
-            new ConcurrentDictionary<Guid, TcpClient>();
-
-        private readonly ConcurrentDictionary<Guid, NetworkStream> _streams =
-            new ConcurrentDictionary<Guid, NetworkStream>();
+        private readonly ConcurrentDictionary<Guid, TcpClient> _clients = new ConcurrentDictionary<Guid, TcpClient>();
+        private readonly ConcurrentDictionary<Guid, NetworkStream> _streams = new ConcurrentDictionary<Guid, NetworkStream>();
+        private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _sendLocks = new ConcurrentDictionary<Guid, SemaphoreSlim>();
 
         private TcpListener _listener;
         private CancellationTokenSource _cts;
         private Task _acceptLoopTask;
 
-        /// <summary>
-        /// Текущий список подключенных клиентов.
-        /// </summary>
         public IReadOnlyCollection<Guid> Clients => _clients.Keys.ToList();
 
         public Task StartAsync(string address, int port, CancellationToken token = default)
@@ -48,7 +42,7 @@ namespace Assets.Scripts.Network.NetTCP
             _listener = new TcpListener(ip, port);
             _listener.Start();
 
-            _acceptLoopTask = Task.Run(() => AcceptLoopAsync(_cts.Token), _cts.Token);
+            _acceptLoopTask = Task.Run(() => AcceptLoopAsync(_cts.Token), CancellationToken.None);
             return Task.CompletedTask;
         }
 
@@ -59,20 +53,30 @@ namespace Assets.Scripts.Network.NetTCP
 
             _cts.Cancel();
 
-            try { _listener.Stop(); } catch { /* ignore */ }
+            try { _listener.Stop(); } catch { }
 
             if (_acceptLoopTask != null)
             {
-                try { await _acceptLoopTask; } catch { /* ignore */ }
+                try { await _acceptLoopTask; } catch { }
             }
 
             foreach (var pair in _clients)
             {
-                try { pair.Value.Close(); } catch { /* ignore */ }
+                try { pair.Value.Close(); } catch { }
+            }
+
+            foreach (var pair in _sendLocks)
+            {
+                pair.Value.Dispose();
             }
 
             _clients.Clear();
             _streams.Clear();
+            _sendLocks.Clear();
+
+            _cts.Dispose();
+            _cts = null;
+            _acceptLoopTask = null;
             _listener = null;
         }
 
@@ -81,6 +85,7 @@ namespace Assets.Scripts.Network.NetTCP
             while (!ct.IsCancellationRequested)
             {
                 TcpClient client = null;
+
                 try
                 {
                     client = await _listener.AcceptTcpClientAsync();
@@ -89,64 +94,63 @@ namespace Assets.Scripts.Network.NetTCP
                 {
                     if (ct.IsCancellationRequested)
                         break;
+
                     continue;
                 }
 
                 var clientId = Guid.NewGuid();
                 _clients[clientId] = client;
                 _streams[clientId] = client.GetStream();
+                _sendLocks[clientId] = new SemaphoreSlim(1, 1);
 
                 Connected?.Invoke(clientId);
-
-                _ = Task.Run(() => ClientReceiveLoopAsync(clientId, client, ct), ct);
+                _ = Task.Run(() => ClientReceiveLoopAsync(clientId, client, ct), CancellationToken.None);
             }
         }
 
         private async Task ClientReceiveLoopAsync(Guid clientId, TcpClient client, CancellationToken ct)
         {
             var stream = client.GetStream();
-            var headerBuffer = new byte[5]; // type(1) + len(4)
+            var headerBuffer = new byte[NetworkPacketCodec.HeaderSize];
 
             try
             {
                 while (!ct.IsCancellationRequested)
                 {
-                    // читаем заголовок
                     if (!await ReadExactAsync(stream, headerBuffer, 0, headerBuffer.Length, ct))
                         break;
 
-                    var type = headerBuffer[0];
-                    var len = headerBuffer[1]
-                              | (headerBuffer[2] << 8)
-                              | (headerBuffer[3] << 16)
-                              | (headerBuffer[4] << 24);
+                    var length = NetworkPacketCodec.ReadLength(headerBuffer, 1);
+                    if (length < 0 || length > NetworkPacketCodec.MaxPayloadBytes)
+                        throw new InvalidOperationException($"Invalid payload length: {length}.");
 
-                    if (len < 0 || len > 10_000_000)
-                        throw new InvalidOperationException("Invalid payload length.");
+                    var packetBuffer = new byte[NetworkPacketCodec.HeaderSize + length];
+                    Buffer.BlockCopy(headerBuffer, 0, packetBuffer, 0, headerBuffer.Length);
 
-                    var payloadBuffer = new byte[1 + 4 + len];
-                    // копируем заголовок в общий буфер
-                    Buffer.BlockCopy(headerBuffer, 0, payloadBuffer, 0, headerBuffer.Length);
-
-                    // читаем тело
-                    if (!await ReadExactAsync(stream, payloadBuffer, 5, len, ct))
+                    if (!await ReadExactAsync(stream, packetBuffer, NetworkPacketCodec.HeaderSize, length, ct))
                         break;
 
-                    var segment = new ArraySegment<byte>(payloadBuffer, 0, payloadBuffer.Length);
-                    DataReceived?.Invoke(clientId, segment);
+                    DataReceived?.Invoke(clientId, new ArraySegment<byte>(packetBuffer));
                 }
             }
-            catch
+            catch (OperationCanceledException)
             {
-                // при желании логировать
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[TcpHostTransport] Receive loop failed for {clientId}: {ex.Message}");
             }
             finally
             {
-                _clients.TryRemove(clientId, out var removedClient);
-                _streams.TryRemove(clientId, out var removedStream);
+                _clients.TryRemove(clientId, out _);
+                _streams.TryRemove(clientId, out _);
 
-                try { client.Close(); } catch { /* ignore */ }
+                if (_sendLocks.TryRemove(clientId, out var sendLock))
+                {
+                    sendLock.Dispose();
+                }
 
+                try { client.Close(); } catch { }
                 Disconnected?.Invoke(clientId);
             }
         }
@@ -159,59 +163,57 @@ namespace Assets.Scripts.Network.NetTCP
                 var read = await stream.ReadAsync(buffer, offset + readTotal, count - readTotal, ct);
                 if (read == 0)
                     return false;
+
                 readTotal += read;
             }
+
             return true;
         }
 
-        public async Task SendAsync(Guid clientId, ArraySegment<byte> payload, CancellationToken token = default)
+        public Task SendAsync(Guid clientId, ArraySegment<byte> payload, CancellationToken token = default)
         {
-            if (!_streams.TryGetValue(clientId, out var stream))
-                return;
-
-            try
-            {
-                await stream.WriteAsync(payload.Array, payload.Offset, payload.Count, token);
-            }
-            catch
-            {
-                // опционально инициировать дисконнект
-            }
+            return WriteToClientAsync(clientId, payload, token);
         }
 
         public async Task BroadcastAsync(ArraySegment<byte> payload, CancellationToken token = default)
         {
-            foreach (var pair in _streams)
+            foreach (var clientId in Clients)
             {
-                try
-                {
-                    await pair.Value.WriteAsync(payload.Array, payload.Offset, payload.Count, token);
-                }
-                catch
-                {
-                    // при ошибке можно инициировать отключение конкретного клиента
-                }
+                await WriteToClientAsync(clientId, payload, token);
             }
         }
 
-        /// <summary>
-        /// Широковещательная отправка всем клиентам, кроме указанного.
-        /// </summary>
         public async Task BroadcastExceptAsync(Guid excludedClientId, ArraySegment<byte> payload, CancellationToken token = default)
         {
-            foreach (var pair in _streams)
+            foreach (var clientId in Clients)
             {
-                if (pair.Key == excludedClientId)
+                if (clientId == excludedClientId)
                     continue;
 
-                try
-                {
-                    await pair.Value.WriteAsync(payload.Array, payload.Offset, payload.Count, token);
-                }
-                catch
-                {
-                    // при ошибке можно инициировать отключение конкретного клиента
-                }
+                await WriteToClientAsync(clientId, payload, token);
+            }
+        }
+
+        private async Task WriteToClientAsync(Guid clientId, ArraySegment<byte> payload, CancellationToken token)
+        {
+            if (payload.Array == null)
+                return;
+
+            if (!_streams.TryGetValue(clientId, out var stream) || !_sendLocks.TryGetValue(clientId, out var sendLock))
+                return;
+
+            await sendLock.WaitAsync(token);
+            try
+            {
+                await stream.WriteAsync(payload.Array, payload.Offset, payload.Count, token);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[TcpHostTransport] Send failed for {clientId}: {ex.Message}");
+            }
+            finally
+            {
+                try { sendLock.Release(); } catch (ObjectDisposedException) { }
             }
         }
 

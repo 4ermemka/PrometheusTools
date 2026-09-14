@@ -13,7 +13,7 @@ namespace Assets.Scripts.Network.NetCore
 
         /// <summary>
         /// Сериализованное состояние мира в формате JSON
-        /// Используется WorldState для сериализации/десериализации
+        /// Используется TrackableNode для сериализации/десериализации
         /// </summary>
         public string WorldDataPayload { get; set; }
 
