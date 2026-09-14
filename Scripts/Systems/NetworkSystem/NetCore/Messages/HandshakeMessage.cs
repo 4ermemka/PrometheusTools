@@ -1,8 +1,7 @@
-﻿using System;
+using System;
 
-namespace Assets.Shared.Network.NetCore.Messages
+namespace Assets.Scripts.Network.NetCore
 {
-    // Handshake сообщение
     [Serializable]
     public class HandshakeMessage
     {

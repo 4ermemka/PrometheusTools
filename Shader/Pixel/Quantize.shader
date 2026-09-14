@@ -4,6 +4,8 @@ Shader "Hidden/Quantize"
     {
         _BlitTexture ("Texture", 2D) = "white" {}
         _PaletteSize ("Palette Size", Float) = 2
+        _PixelSize ("Pixel Size", Float) = 8
+        _ApplyPixelation ("Apply Pixelation", Float) = 0
     }
     SubShader
     {
@@ -25,13 +27,24 @@ Shader "Hidden/Quantize"
             float4 _BlitTexture_TexelSize;
 
             uniform float4 _PaletteColors[256];
+            uniform float4 _PaletteLabColors[256];
             uniform float _PaletteSize;
+            float _PixelSize;
+            float _ApplyPixelation;
 
             Varyings Vert(Attributes input) {
                 Varyings o;
                 o.pos = GetFullScreenTriangleVertexPosition(input.vertexID);
                 o.uv = GetFullScreenTriangleTexCoord(input.vertexID);
                 return o;
+            }
+
+            float2 GetPixelBlockCenter(float2 uv) {
+                float pixelSize = max(_PixelSize, 1.0);
+                float2 stepUV = min(pixelSize * _BlitTexture_TexelSize.xy, float2(1.0, 1.0));
+                float2 blockMin = floor(uv / stepUV) * stepUV;
+                blockMin = min(max(blockMin, float2(0.0, 0.0)), max(float2(0.0, 0.0), float2(1.0, 1.0) - stepUV));
+                return saturate(blockMin + stepUV * 0.5);
             }
 
             #if defined(DISTANCE_LAB_DELTAE)
@@ -52,32 +65,35 @@ Shader "Hidden/Quantize"
                 float b = 200.0 * (f.y - f.z);
                 return float3(L, a, b);
             }
-            float deltaE(float3 lab1, float3 lab2) {
+            float deltaE2(float3 lab1, float3 lab2) {
                 float3 d = lab1 - lab2;
-                return sqrt(dot(d,d));
+                return dot(d,d);
             }
             #endif
 
             float4 Frag(Varyings i) : SV_Target {
-                float4 original = SAMPLE_TEXTURE2D(_BlitTexture, sampler_BlitTexture, i.uv);
+                float2 sampleUV = (_ApplyPixelation > 0.5) ? GetPixelBlockCenter(i.uv) : i.uv;
+                float4 original = SAMPLE_TEXTURE2D(_BlitTexture, sampler_BlitTexture, sampleUV);
                 int paletteCount = (int)_PaletteSize;
                 if (paletteCount <= 0) return original;
 
                 float bestDist = 1e10;
-                float3 bestColor = original.rgb;
+                float3 originalRgb = saturate(original.rgb);
+                float3 bestColor = originalRgb;
 
                 #if defined(DISTANCE_LAB_DELTAE)
-                    float3 labOrig = xyz2lab(rgb2xyz(original.rgb));
+                    float3 labOrig = xyz2lab(rgb2xyz(originalRgb));
                 #endif
 
                 for (int idx = 0; idx < paletteCount; idx++) {
                     float3 palColor = _PaletteColors[idx].rgb;
 
                     #if defined(DISTANCE_LAB_DELTAE)
-                        float3 labPal = xyz2lab(rgb2xyz(palColor));
-                        float dist = deltaE(labOrig, labPal);
+                        float3 labPal = _PaletteLabColors[idx].rgb;
+                        float dist = deltaE2(labOrig, labPal);
                     #else
-                        float dist = distance(original.rgb, palColor);
+                        float3 d = originalRgb - palColor;
+                        float dist = dot(d, d);
                     #endif
 
                     if (dist < bestDist) {

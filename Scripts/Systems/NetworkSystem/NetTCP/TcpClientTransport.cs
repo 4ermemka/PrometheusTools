@@ -9,8 +9,7 @@ using UnityEngine;
 namespace Assets.Scripts.Network.NetTCP
 {
     /// <summary>
-    /// TCP-транспорт для клиента.
-    /// Реализует тот же length-prefixed протокол: [type:1][len:4][payload:len].
+    /// TCP client transport. The client has one remote endpoint, addressed as Guid.Empty.
     /// </summary>
     public sealed class TcpClientTransport : ITransport
     {
@@ -18,13 +17,14 @@ namespace Assets.Scripts.Network.NetTCP
         public event Action<Guid> Disconnected;
         public event Action<Guid, ArraySegment<byte>> DataReceived;
 
+        private readonly Guid _serverId = Guid.Empty;
+        private readonly SemaphoreSlim _sendLock = new SemaphoreSlim(1, 1);
+
         private TcpClient _client;
         private NetworkStream _stream;
         private CancellationTokenSource _cts;
         private Task _receiveLoopTask;
-
-        // Для клиента serverId всегда один (можно использовать Guid.Empty).
-        private readonly Guid _serverId = Guid.Empty;
+        private int _disconnectRaised;
 
         public IReadOnlyCollection<Guid> Clients { get; } = new[] { Guid.Empty };
 
@@ -33,16 +33,15 @@ namespace Assets.Scripts.Network.NetTCP
             if (_client != null)
                 throw new InvalidOperationException("Client already started.");
 
+            _disconnectRaised = 0;
             _cts = CancellationTokenSource.CreateLinkedTokenSource(token);
             _client = new TcpClient();
 
             await _client.ConnectAsync(address, port);
             _stream = _client.GetStream();
 
-            if (Connected != null)
-                Connected(_serverId);
-
-            _receiveLoopTask = Task.Run(() => ReceiveLoopAsync(_cts.Token), _cts.Token);
+            Connected?.Invoke(_serverId);
+            _receiveLoopTask = Task.Run(() => ReceiveLoopAsync(_cts.Token), CancellationToken.None);
         }
 
         public async Task StopAsync(CancellationToken token = default)
@@ -52,23 +51,26 @@ namespace Assets.Scripts.Network.NetTCP
 
             _cts.Cancel();
 
-            try { _client.Close(); } catch { /* ignore */ }
+            try { _client.Close(); } catch { }
 
             if (_receiveLoopTask != null)
             {
-                try { await _receiveLoopTask; } catch { /* ignore */ }
+                try { await _receiveLoopTask; } catch { }
             }
 
             _client = null;
             _stream = null;
+            _receiveLoopTask = null;
 
-            if (Disconnected != null)
-                Disconnected(_serverId);
+            _cts.Dispose();
+            _cts = null;
+
+            RaiseDisconnectedOnce();
         }
 
         private async Task ReceiveLoopAsync(CancellationToken ct)
         {
-            var headerBuffer = new byte[5];
+            var headerBuffer = new byte[NetworkPacketCodec.HeaderSize];
 
             try
             {
@@ -77,36 +79,33 @@ namespace Assets.Scripts.Network.NetTCP
                     if (!await ReadExactAsync(_stream, headerBuffer, 0, headerBuffer.Length, ct))
                         break;
 
-                    var type = headerBuffer[0];
-                    var len = headerBuffer[1]
-                              | (headerBuffer[2] << 8)
-                              | (headerBuffer[3] << 16)
-                              | (headerBuffer[4] << 24);
+                    var length = NetworkPacketCodec.ReadLength(headerBuffer, 1);
+                    if (length < 0 || length > NetworkPacketCodec.MaxPayloadBytes)
+                        throw new InvalidOperationException($"Invalid payload length: {length}.");
 
-                    if (len < 0 || len > 10_000_000)
-                        throw new InvalidOperationException("Invalid payload length.");
+                    var packetBuffer = new byte[NetworkPacketCodec.HeaderSize + length];
+                    Buffer.BlockCopy(headerBuffer, 0, packetBuffer, 0, headerBuffer.Length);
 
-                    var payloadBuffer = new byte[1 + 4 + len];
-                    Buffer.BlockCopy(headerBuffer, 0, payloadBuffer, 0, headerBuffer.Length);
-
-                    if (!await ReadExactAsync(_stream, payloadBuffer, 5, len, ct))
+                    if (!await ReadExactAsync(_stream, packetBuffer, NetworkPacketCodec.HeaderSize, length, ct))
                         break;
 
-                    var segment = new ArraySegment<byte>(payloadBuffer, 0, payloadBuffer.Length);
-                    if (DataReceived != null)
-                        DataReceived(_serverId, segment);
+                    DataReceived?.Invoke(_serverId, new ArraySegment<byte>(packetBuffer));
                 }
             }
-            catch(Exception ex)
+            catch (OperationCanceledException)
             {
-                // лог при желании
-                Debug.LogException(ex);
             }
-            //finally
-            //{
-            //    if (Disconnected != null)
-            //        Disconnected(_serverId);
-            //}
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[TcpClientTransport] Receive loop failed: {ex.Message}");
+            }
+            finally
+            {
+                if (!ct.IsCancellationRequested)
+                {
+                    RaiseDisconnectedOnce();
+                }
+            }
         }
 
         private static async Task<bool> ReadExactAsync(NetworkStream stream, byte[] buffer, int offset, int count, CancellationToken ct)
@@ -117,36 +116,50 @@ namespace Assets.Scripts.Network.NetTCP
                 var read = await stream.ReadAsync(buffer, offset + readTotal, count - readTotal, ct);
                 if (read == 0)
                     return false;
+
                 readTotal += read;
             }
+
             return true;
         }
 
         public async Task SendAsync(Guid clientId, ArraySegment<byte> payload, CancellationToken token = default)
         {
-            if (_stream == null)
+            if (_stream == null || payload.Array == null)
                 return;
 
+            await _sendLock.WaitAsync(token);
             try
             {
                 await _stream.WriteAsync(payload.Array, payload.Offset, payload.Count, token);
             }
-            catch
+            catch (Exception ex)
             {
-                // при ошибке можно дернуть StopAsync/Disconnect
+                Debug.LogWarning($"[TcpClientTransport] Send failed: {ex.Message}");
+            }
+            finally
+            {
+                try { _sendLock.Release(); } catch (ObjectDisposedException) { }
             }
         }
 
         public Task BroadcastAsync(ArraySegment<byte> payload, CancellationToken token = default)
         {
-            // Для клиента Broadcast == Send на хост
             return SendAsync(_serverId, payload, token);
+        }
+
+        private void RaiseDisconnectedOnce()
+        {
+            if (Interlocked.Exchange(ref _disconnectRaised, 1) == 0)
+            {
+                Disconnected?.Invoke(_serverId);
+            }
         }
 
         public void Dispose()
         {
             _ = StopAsync();
+            _sendLock.Dispose();
         }
     }
-
 }

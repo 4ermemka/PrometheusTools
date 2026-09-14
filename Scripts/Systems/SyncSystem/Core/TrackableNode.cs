@@ -1,4 +1,4 @@
-using System;
+п»їusing System;
 using System.Collections.Generic;
 using System.Reflection;
 
@@ -6,212 +6,231 @@ namespace Assets.Shared.SyncSystem.Core
 {
     public abstract class TrackableNode : ITrackable
     {
-        private class TrackableField
+        private sealed class TrackableField
         {
             public string Name { get; set; }
             public ITrackable Trackable { get; set; }
         }
 
-        private bool _initialized = false;
+        private bool _initialized;
         private readonly Dictionary<string, TrackableField> _trackableFields = new Dictionary<string, TrackableField>();
 
         private event Action<string, object, object> _changed;
         private event Action<string, object> _patched;
 
         public event Action<string, object, object> Changed
+        {
+            add
             {
-                add => _changed += value;
-                remove => _changed -= value;
+                EnsureTrackingInitialized();
+                _changed += value;
             }
+            remove => _changed -= value;
+        }
 
         public event Action<string, object> Patched
+        {
+            add
             {
-                add => _patched += value;
-                remove => _patched -= value;
+                EnsureTrackingInitialized();
+                _patched += value;
             }
+            remove => _patched -= value;
+        }
 
         protected virtual void OnChanged(string path, object oldValue, object newValue)
+        {
+            if (!SyncMutationScope.IsSilent)
             {
                 _changed?.Invoke(path, oldValue, newValue);
             }
+        }
 
         protected virtual void OnPatched(string path, object value)
+        {
+            _patched?.Invoke(path, value);
+        }
+
+        protected TrackableNode()
+        {
+        }
+
+        protected void EnsureTrackingInitialized()
+        {
+            if (_initialized) return;
+
+            _trackableFields.Clear();
+            var fields = GetType().GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+
+            foreach (var field in fields)
             {
-                _patched?.Invoke(path, value);
-            }
+                if (!typeof(ITrackable).IsAssignableFrom(field.FieldType))
+                    continue;
 
-        protected TrackableNode() => InitializeTracking();
+                if (!(field.GetValue(this) is ITrackable trackable))
+                    continue;
 
-        protected virtual void InitializeTracking()
-            {
-                if (_initialized) return;
-
-                var fields = GetType().GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-
-                foreach (var field in fields)
+                var fieldName = field.Name;
+                _trackableFields[fieldName] = new TrackableField
                 {
-                    if (typeof(ITrackable).IsAssignableFrom(field.FieldType))
-                    {
-                        var trackable = field.GetValue(this) as ITrackable;
-                        if (trackable != null)
-                        {
-                            var fieldName = field.Name;
-                            var trackableField = new TrackableField
-                            {
-                                Name = fieldName,
-                                Trackable = trackable
-                            };
+                    Name = fieldName,
+                    Trackable = trackable
+                };
 
-                            _trackableFields[fieldName] = trackableField;
+                trackable.Changed += (path, oldValue, newValue) =>
+                {
+                    var fullPath = string.IsNullOrEmpty(path) ? fieldName : $"{fieldName}.{path}";
+                    OnChanged(fullPath, oldValue, newValue);
+                };
 
-                            // Подписываемся на Changed детей для всплытия
-                            trackable.Changed += (path, oldVal, newVal) =>
-                            {
-                                var fullPath = string.IsNullOrEmpty(path) ? fieldName : $"{fieldName}.{path}";
-                                _changed?.Invoke(fullPath, oldVal, newVal);
-                            };
-                        }
-                    }
-                }
-
-                _initialized = true;
+                trackable.Patched += (path, value) =>
+                {
+                    var fullPath = string.IsNullOrEmpty(path) ? fieldName : $"{fieldName}.{path}";
+                    OnPatched(fullPath, value);
+                };
             }
+
+            _initialized = true;
+        }
 
         public virtual void ApplyPatch(string path, object value)
-            {
-                if (string.IsNullOrEmpty(path))
-                    return;
+        {
+            if (string.IsNullOrEmpty(path))
+                return;
 
+            EnsureTrackingInitialized();
+            using (SyncMutationScope.EnterSilent())
+            {
                 var parts = path.Split('.');
                 ApplyPatchInternal(parts, 0, value);
             }
+        }
 
         protected virtual void ApplyPatchInternal(string[] pathParts, int index, object value)
+        {
+            if (index >= pathParts.Length) return;
+
+            var currentPart = pathParts[index];
+            if (!_trackableFields.TryGetValue(currentPart, out var fieldInfo))
+                return;
+
+            var trackable = fieldInfo.Trackable;
+            if (index == pathParts.Length - 1)
             {
-                if (index >= pathParts.Length) return;
-
-                var currentPart = pathParts[index];
-
-                if (!_trackableFields.TryGetValue(currentPart, out var fieldInfo))
-                    return;
-
-                var trackable = fieldInfo.Trackable;
-
-                if (index == pathParts.Length - 1)
-                {
-                    // Конечный элемент - применяем патч здесь
-                    trackable.ApplyPatch("", value);
-                    OnPatched(pathParts[index], value);
-                }
-                else if (CanHandleRecursivePath(trackable, pathParts, index))
-                {
-                    // Рекурсивно спускаемся дальше
-                    HandleRecursivePath(trackable, pathParts, index, value);
-                }
+                trackable.ApplyPatch("", value);
+                return;
             }
 
-        // Добавляем виртуальные методы для расширения логики
+            if (CanHandleRecursivePath(trackable, pathParts, index))
+            {
+                HandleRecursivePath(trackable, pathParts, index, value);
+            }
+        }
+
         protected virtual bool CanHandleRecursivePath(ITrackable trackable, string[] pathParts, int currentIndex)
-            {
-                // По умолчанию только TrackableNode могут обрабатывать рекурсивные пути
-                return trackable is TrackableNode;
-            }
+        {
+            return trackable is TrackableNode;
+        }
 
         protected virtual void HandleRecursivePath(ITrackable trackable, string[] pathParts, int currentIndex, object value)
+        {
+            if (trackable is TrackableNode node)
             {
-                if (trackable is TrackableNode node)
-                {
-                    node.ApplyPatchInternal(pathParts, currentIndex + 1, value);
-                }
+                node.EnsureTrackingInitialized();
+                node.ApplyPatchInternal(pathParts, currentIndex + 1, value);
             }
+        }
 
         public virtual object GetValue(string path)
-            {
-                if (string.IsNullOrEmpty(path))
-                    return null;
+        {
+            if (string.IsNullOrEmpty(path))
+                return null;
 
-                var parts = path.Split('.');
-                return GetValueInternal(parts, 0);
-            }
+            EnsureTrackingInitialized();
+            var parts = path.Split('.');
+            return GetValueInternal(parts, 0);
+        }
 
         private object GetValueInternal(string[] pathParts, int index)
+        {
+            if (index >= pathParts.Length) return null;
+
+            var currentPart = pathParts[index];
+            if (!_trackableFields.TryGetValue(currentPart, out var fieldInfo))
+                return null;
+
+            var trackable = fieldInfo.Trackable;
+            if (index == pathParts.Length - 1)
+                return trackable.GetValue("");
+
+            if (trackable is TrackableNode node)
             {
-                if (index >= pathParts.Length) return null;
+                node.EnsureTrackingInitialized();
+                return node.GetValueInternal(pathParts, index + 1);
+            }
 
-                var currentPart = pathParts[index];
+            return null;
+        }
 
-                if (!_trackableFields.TryGetValue(currentPart, out var fieldInfo))
-                    return null;
+        public virtual Dictionary<string, object> CreateSnapshot()
+        {
+            var snapshot = new Dictionary<string, object>();
+            BuildSnapshot("", snapshot);
+            return snapshot;
+        }
 
-                var trackable = fieldInfo.Trackable;
+        public virtual void BuildSnapshot(string currentPath, Dictionary<string, object> snapshot)
+        {
+            EnsureTrackingInitialized();
 
-                if (index == pathParts.Length - 1)
+            foreach (var kvp in _trackableFields)
+            {
+                var fieldName = kvp.Key;
+                var trackable = kvp.Value.Trackable;
+                var fullPath = string.IsNullOrEmpty(currentPath) ? fieldName : $"{currentPath}.{fieldName}";
+
+                if (trackable is SyncBase sync)
                 {
-                    return trackable.GetValue("");
+                    snapshot[fullPath] = sync.GetValue("");
                 }
                 else if (trackable is TrackableNode node)
                 {
-                    return node.GetValueInternal(pathParts, index + 1);
-                }
-
-                return null;
-            }
-
-        // Методы для снапшотов
-        public virtual Dictionary<string, object> CreateSnapshot()
-            {
-                var snapshot = new Dictionary<string, object>();
-                BuildSnapshot("", snapshot);
-                return snapshot;
-            }
-
-        public virtual void BuildSnapshot(string currentPath, Dictionary<string, object> snapshot)
-            {
-                foreach (var kvp in _trackableFields)
-                {
-                    var fieldName = kvp.Key;
-                    var trackable = kvp.Value.Trackable;
-                    var fullPath = string.IsNullOrEmpty(currentPath) ? fieldName : $"{currentPath}.{fieldName}";
-
-                    if (trackable is SyncBase sync)
-                    {
-                        snapshot[fullPath] = sync.GetValue("");
-                    }
-                    else if (trackable is TrackableNode node)
-                    {
-                        node.BuildSnapshot(fullPath, snapshot);
-                    }
+                    node.BuildSnapshot(fullPath, snapshot);
                 }
             }
+        }
 
         public virtual void ApplySnapshot(Dictionary<string, object> snapshot)
+        {
+            if (snapshot == null) return;
+
+            using (SyncMutationScope.EnterSilent())
             {
-                // Просто применяем каждый элемент как патч
                 foreach (var kvp in snapshot)
                 {
                     ApplyPatch(kvp.Key, kvp.Value);
                 }
-                OnPatched($"{this.GetType().Name}", snapshot);
             }
 
-        // Новый метод для получения ITrackable по имени поля
+            OnPatched(GetType().Name, snapshot);
+        }
+
         protected virtual ITrackable GetTrackableField(string fieldName)
-            {
-                _trackableFields.TryGetValue(fieldName, out var fieldInfo);
-                return fieldInfo?.Trackable;
-            }
+        {
+            EnsureTrackingInitialized();
+            _trackableFields.TryGetValue(fieldName, out var fieldInfo);
+            return fieldInfo?.Trackable;
+        }
 
-        // Новый метод для проверки, является ли путь специальным (например, индексом списка)
         protected virtual bool IsSpecialPath(string pathPart, out string parsedValue)
-            {
-                parsedValue = null;
-                return false;
-            }
+        {
+            parsedValue = null;
+            return false;
+        }
 
-        // Новый метод для обработки специального пути при применении патча
         protected virtual bool HandleSpecialPath(string[] pathParts, int currentIndex, object value)
-            {
-                return false;
-            }
+        {
+            return false;
+        }
     }
 }
