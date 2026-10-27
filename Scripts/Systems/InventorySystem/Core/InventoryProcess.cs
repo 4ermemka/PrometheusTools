@@ -22,6 +22,11 @@ namespace Assets.Shared.Systems.InventorySystem.Core
             InventoryActionOptions options = null);
     }
 
+    /// <summary>
+    /// Общая основа процессов над инвентарями (крафт, обмен и т.п.) с типизированным запросом.
+    /// Стандартный путь исполняет одну mutation; процесс с несколькими хранилищами может переопределить
+    /// CanExecute/TryExecute и организовать согласованное изменение всех участников, как RecipeCraftingStation.
+    /// </summary>
     public abstract class InventoryProcessBase<TItem, TRequest> :
         InventoryBase<TItem>,
         IInventoryProcess<TItem, TRequest>
@@ -35,7 +40,7 @@ namespace Assets.Shared.Systems.InventorySystem.Core
         protected abstract InventoryActionKind ProcessKind { get; }
         protected virtual string ProcessName => ProcessKind.ToString();
 
-        public InventoryValidationResult CanExecute(TRequest request)
+        public virtual InventoryValidationResult CanExecute(TRequest request)
         {
             var action = BuildProcessAction(
                 request,
@@ -43,7 +48,7 @@ namespace Assets.Shared.Systems.InventorySystem.Core
             return EvaluateAction(action, () => ValidateRequest(request, action));
         }
 
-        public InventoryOperationResult<TItem> TryExecute(
+        public virtual InventoryOperationResult<TItem> TryExecute(
             TRequest request,
             InventoryActionOptions options = null)
         {

@@ -14,7 +14,7 @@ public class ManagersHolder : MonoBehaviour
 
     private void Awake()
     {
-        DontDestroyOnLoad(gameObject);
+        // Камера, сетка и ввод принадлежат загружаемой сцене. Сессия хранится отдельно.
         if (Instance == null)
         {
             Instance = this;
@@ -28,10 +28,12 @@ public class ManagersHolder : MonoBehaviour
         }
     }
 
+    private void OnDestroy() { if (Instance == this) Instance = null; }
+
     public T GetManager<T>() where T : Manager
     {
         if (Managers.TryGetValue(typeof(T), out var manager))
-        { 
+        {
             return manager as T;
         }
         return null;

@@ -16,6 +16,10 @@ namespace Assets.Shared.Systems.InventorySystem.Crafting
     {
     }
 
+    /// <summary>
+    /// Помечает общий inventory-процесс видом действия Craft. Не подбирает рецепты и не владеет ячейками;
+    /// эти обязанности реализует RecipeCraftingStation, используемый компонентом Unity.
+    /// </summary>
     public abstract class CraftingStationBase<TItem, TRequest> :
         InventoryProcessBase<TItem, TRequest>,
         ICraftingStation<TItem, TRequest>

@@ -1,36 +1,28 @@
-using System.Collections.Generic;
-using UnityEngine;
+using System;
+using Shared.Inputs;
 
+/// <summary>Unity-владелец корня. Алгоритм цепочки находится в тестируемом InputContextChain.</summary>
 public class InputContextManager : Manager
 {
-    [SerializeField] public InputContext CurrentContext;
-
-    /// <summary>
-    /// Добавление нового контекста
-    /// </summary>
-    /// <param name="newContext">Новый контекст</param>
-    public void AddContext(InputContext newContext)
+    private InputContextChain chain;
+    public InputContext CurrentContext => chain?.Current;
+    public InputContextChain Chain => chain;
+    public void SetRootContext(InputContext context)
     {
-        CurrentContext.Deactivate(); // Выключить реакцию инпут у основного
-        var previousContext = CurrentContext; // Запомнить его в отдельный слот
-        newContext.Previous = previousContext; // Назначить новому ссылку на предыдущий
-
-        CurrentContext = newContext; // Переназначить новый
-        CurrentContext.Init(); // Запустить (инициализация, анимации и т.д.)
-        CurrentContext.Activate(); // Включить реакцию на инпут
+        if (context == null) throw new ArgumentNullException(nameof(context));
+        var source = context.ActionSource ?? InputManager.Instance;
+        var next = (source as IContextInputSource)?.Contexts ?? new InputContextChain(source);
+        next.SetRoot(context);
+        var previous = chain;
+        chain = next;
+        if (previous != null && previous != next) previous.Dispose();
     }
-
-    public void EscapeContext()
+    public IDisposable AddContext(InputContext context)
     {
-        var previousContext = CurrentContext.Previous; // Вытащить прошлый контекст
-
-        if (previousContext != null) // Если есть прошлый -- откат к нему. Если нет -- не реагируем, это корень.
-        {
-            CurrentContext.Deactivate(); //Выключить реакцию на инпут (обрубить подписки)
-            CurrentContext.Dispose(); // Удалить текущий
-
-            CurrentContext = previousContext; // Назначить предыдущий основным
-            CurrentContext.Activate(); // Включить реакцию на инпут
-        }
+        if (chain == null) throw new InvalidOperationException("SetRootContext must be called first.");
+        return chain.Enter(context);
     }
+    public bool EscapeContext() => chain != null && chain.Pop();
+    protected virtual void OnDestroy() => chain?.Dispose();
 }
+

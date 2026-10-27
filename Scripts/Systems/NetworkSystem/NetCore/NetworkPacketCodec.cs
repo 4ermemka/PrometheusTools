@@ -10,6 +10,7 @@ namespace Assets.Scripts.Network.NetCore
         public static ArraySegment<byte> Pack<T>(MessageType type, T message)
         {
             var payload = JsonGameSerializer.SerializeToBytes(message);
+            if (payload.Length > MaxPayloadBytes) throw new ArgumentException("Payload exceeds the protocol limit.", nameof(message));
             var result = new byte[HeaderSize + payload.Length];
 
             result[0] = (byte)type;

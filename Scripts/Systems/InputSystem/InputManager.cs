@@ -1,176 +1,156 @@
 using System;
 using System.Collections.Generic;
+using Shared.Inputs;
 using UnityEngine;
 
-/// <summary> Единый интерфейс для всех действий ввода </summary>
-public interface IInputAction
-{
-    string Name { get; }
-    event Action OnPressed;
-    event Action OnHeld;
-    event Action OnReleased;
-    void ProcessUpdate();
-}
-
-/// <summary> Действие клавиши (аналогично предыдущей версии) </summary>
-[Serializable]
-public class KeyAction : IInputAction
-{
-    public string name;
-    public KeyCode key;
-
-    public event Action OnPressed;
-    public event Action OnHeld;
-    public event Action OnReleased;
-
-    public string Name => name;
-
-    public void ProcessUpdate()
-    {
-        if (Input.GetKeyDown(key))
-            OnPressed?.Invoke();
-        else if (Input.GetKeyUp(key))
-            OnReleased?.Invoke();
-        else if (Input.GetKey(key))
-            OnHeld?.Invoke();
-    }
-}
-
-/// <summary> Действие прокрутки колёсика (вверх или вниз) </summary>
-public class ScrollAction : IInputAction
-{
-    public enum Direction { Up, Down }
-
-    private readonly string actionName;
-    private readonly Direction direction;
-
-    // состояние для эмуляции Pressed/Held/Released
-    private bool isActive;
-    private bool wasActive;
-
-    public event Action OnPressed;
-    public event Action OnHeld;
-    public event Action OnReleased;
-    public string Name => actionName;
-
-    public ScrollAction(string name, Direction dir)
-    {
-        actionName = name;
-        direction = dir;
-    }
-
-    public void ProcessUpdate()
-    {
-        float scroll = Input.GetAxis("Mouse ScrollWheel");
-        isActive = (direction == Direction.Up && scroll > 0f) ||
-                   (direction == Direction.Down && scroll < 0f);
-
-        if (isActive && !wasActive)
-            OnPressed?.Invoke();
-        else if (isActive && wasActive)
-            OnHeld?.Invoke();
-        else if (!isActive && wasActive)
-            OnReleased?.Invoke();
-
-        wasActive = isActive;
-    }
-}
-
-/// <summary> Центральный обработчик ввода </summary>
-public class InputManager : Manager
+/// <summary>
+/// Unity lifecycle/input backend. РРіСЂРѕРІР°СЏ Р»РѕРіРёРєР° СЃР»СѓС€Р°РµС‚ РґРµР№СЃС‚РІРёРµ, Р° РЅРµ С„РёР·РёС‡РµСЃРєСѓСЋ РєР»Р°РІРёС€Сѓ.
+/// РљР°С‚Р°Р»РѕРі С„РёРєСЃРёСЂСѓРµС‚СЃСЏ РїСЂРё Initialize; РїРѕР»СЊР·РѕРІР°С‚РµР»СЊСЃРєРёРµ РїСЂРёРІСЏР·РєРё Р¶РёРІСѓС‚ РѕС‚РґРµР»СЊРЅРѕ РѕС‚ asset.
+/// </summary>
+[DefaultExecutionOrder(-100)]
+public class InputManager : Manager, IContextInputSource
 {
     public static Action OnStarted;
-
-    [Header("Клавиши")]
-    [SerializeField]
-    private KeyAction[] keyActions = {
-        new KeyAction { name = "ToggleToolbar", key = KeyCode.Tab }
-    };
-
-    [Serializable]
-    public struct ScrollEntry
-    {
-        public string name;
-    }
-
-    [Header("Прокрутка вверх")]
-    [SerializeField] private ScrollEntry[] scrollUpEntries;
-
-    [Header("Прокрутка вниз")]
-    [SerializeField] private ScrollEntry[] scrollDownEntries;
-
-    private List<IInputAction> allActions = new List<IInputAction>();
-    private Dictionary<string, IInputAction> actionsMap = new Dictionary<string, IInputAction>();
-    private Dictionary<KeyCode, KeyAction> keysMap = new Dictionary<KeyCode, KeyAction>();
-
     public static InputManager Instance { get; private set; }
+    [SerializeField] private GameInputProfile profile;
+    [SerializeField] private bool saveBindings = true;
+
+    // РњРёРіСЂР°С†РёРѕРЅРЅС‹Р№ РјРѕСЃС‚ СЃС†РµРЅ v1: РёРјРµРЅР° РїРѕР»РµР№ СЃРѕС…СЂР°РЅРµРЅС‹, РЅРѕРІС‹Р№ РїСЂРѕС„РёР»СЊ РёРјРµРµС‚ РїСЂРёРѕСЂРёС‚РµС‚.
+    [Serializable] private sealed class LegacyKeyEntry { public string name; public KeyCode key; }
+    [Serializable] public struct ScrollEntry { public string name; }
+    [SerializeField, HideInInspector] private LegacyKeyEntry[] keyActions;
+    [SerializeField, HideInInspector] private ScrollEntry[] scrollUpEntries;
+    [SerializeField, HideInInspector] private ScrollEntry[] scrollDownEntries;
+
+    private readonly List<Func<bool>> gates = new();
+    private IReadOnlyList<GameActionDefinition> definitions;
+    private IInputSource source;
+    private IBindingStore store;
+    private bool initialized;
+    private bool applicationFocused = true;
+    private Func<InputBinding, bool> captureFilter;
+    public GameActionRouter Router { get; private set; }
+    public RebindCapture Capture { get; private set; }
+    public InputContextChain Contexts { get { Initialize(); return Router.Contexts; } }
+    public IReadOnlyList<GameActionDefinition> Definitions => definitions;
+    public bool AnyInputHeld => source != null && source.AnyHeld;
+    public event Action BindingsChanged;
+    public event Action CaptureChanged;
 
     private void Awake()
     {
-        if (Instance == null)
-        {
-            Instance = this;
-            Initialize();
-            DontDestroyOnLoad(gameObject);
-            OnStarted?.Invoke();
-        }
-        else Destroy(gameObject);
+        if (Instance != null && Instance != this) { enabled = false; Destroy(this); return; }
+        Instance = this;
+        Initialize();
+        // Р–РёР·РЅСЊСЋ root СѓРїСЂР°РІР»СЏРµС‚ ManagersHolder; child РЅРµР»СЊР·СЏ РїРµСЂРµРґР°РІР°С‚СЊ DontDestroyOnLoad.
+        OnStarted?.Invoke();
     }
+    public override void Init() { Initialize(); base.Init(); }
 
-    private void Initialize()
+    public void Initialize(IInputSource inputSource = null, IBindingStore bindingStore = null)
     {
-        // Клавиши
-        foreach (var action in keyActions)
+        if (initialized) return;
+        source = inputSource ?? new LegacyInputSource();
+        definitions = profile != null ? profile.Actions : MigrateLegacy();
+        Router = new GameActionRouter(definitions);
+        store = bindingStore ?? (saveBindings && profile != null ? new PlayerPrefsBindingStore(profile.ProfileId) : null);
+        if (store != null)
         {
-            if (action == null) continue;
-            allActions.Add(action);
-            actionsMap[action.name] = action;
-            keysMap[action.key] = action;
+            try { PlayerPrefsBindingStore.Apply(Router.Bindings, store.Load()); }
+            catch (Exception error) { Debug.LogWarning($"Input: РЅР°СЃС‚СЂРѕР№РєРё РЅРµ РїСЂРѕС‡РёС‚Р°РЅС‹, РёСЃРїРѕР»СЊР·СѓСЋС‚СЃСЏ defaults. {error.Message}", this); }
         }
-
-        // Скролл вверх
-        if (scrollUpEntries != null)
-        {
-            foreach (var entry in scrollUpEntries)
-            {
-                if (string.IsNullOrEmpty(entry.name)) continue;
-                var scrollAction = new ScrollAction(entry.name, ScrollAction.Direction.Up);
-                allActions.Add(scrollAction);
-                actionsMap[entry.name] = scrollAction;
-            }
-        }
-
-        // Скролл вниз
-        if (scrollDownEntries != null)
-        {
-            foreach (var entry in scrollDownEntries)
-            {
-                if (string.IsNullOrEmpty(entry.name)) continue;
-                var scrollAction = new ScrollAction(entry.name, ScrollAction.Direction.Down);
-                allActions.Add(scrollAction);
-                actionsMap[entry.name] = scrollAction;
-            }
-        }
+        Router.Bindings.Changed += OnBindingsChanged;
+        initialized = true;
     }
 
+    public GameInputAction GetAction(string id) { Initialize(); return Router.GetAction(id); }
+    public InputBinding GetBinding(string id) { Initialize(); return Router.Bindings[id]; }
+    public void Rebind(string id, InputBinding binding) { Initialize(); Router.Bindings.Rebind(id, binding); }
+    public IDisposable Suspend() { Initialize(); return Router.Suspend(); }
+    public IDisposable AddGate(Func<bool> isBlocked)
+    {
+        if (isBlocked == null) throw new ArgumentNullException(nameof(isBlocked));
+        gates.Add(isBlocked);
+        return new InputSubscription(() => gates.Remove(isBlocked));
+    }
+
+    public void BeginRebind(string id, Func<InputBinding, bool> accept = null)
+    {
+        Initialize();
+        CancelRebind();
+        Capture = new RebindCapture(Router, id);
+        captureFilter = accept;
+        Capture.Finished += OnCaptureFinished;
+        CaptureChanged?.Invoke();
+    }
+    public void CancelRebind() => Capture?.Dispose();
+    private void OnCaptureFinished()
+    {
+        Capture.Finished -= OnCaptureFinished;
+        Capture = null;
+        captureFilter = null;
+        CaptureChanged?.Invoke();
+    }
+    public void ResetBindings()
+    {
+        Initialize();
+        CancelRebind();
+        Router.Bindings.ReplaceWith(new BindingTable(definitions));
+    }
+    private void OnBindingsChanged()
+    {
+        if (store != null)
+        {
+            var result = new BindingOverride[definitions.Count];
+            for (int i = 0; i < definitions.Count; i++)
+                result[i] = new BindingOverride { actionId = definitions[i].Id, binding = Router.Bindings[definitions[i].Id] };
+            try { store.Save(result); }
+            catch (Exception error) { Debug.LogWarning($"Input: РїСЂРёРІСЏР·РєРё РґРµР№СЃС‚РІСѓСЋС‚, РЅРѕ СЃРѕС…СЂР°РЅРёС‚СЊ РёС… РЅРµ СѓРґР°Р»РѕСЃСЊ. {error.Message}", this); }
+        }
+        BindingsChanged?.Invoke();
+    }
     private void Update()
     {
-        foreach (var action in allActions)
+        if (!initialized || !applicationFocused) return;
+        if (Capture != null) { Capture.Tick(source, captureFilter); return; }
+        foreach (var gate in gates)
+            if (gate()) { Router.RequireNeutral(); return; }
+        Router.Tick(source);
+    }
+    private void OnApplicationFocus(bool focused)
+    {
+        applicationFocused = focused;
+        if (!focused) CancelRebind();
+        Router?.RequireNeutral();
+    }
+    private void OnDisable() { CancelRebind(); Router?.RequireNeutral(); }
+    private void OnDestroy()
+    {
+        CancelRebind();
+        if (Router != null) Router.Bindings.Changed -= OnBindingsChanged;
+        Router?.Contexts.Dispose();
+        if (Instance == this) Instance = null;
+        gates.Clear();
+    }
+    private IReadOnlyList<GameActionDefinition> MigrateLegacy()
+    {
+        var actions = new List<GameActionDefinition>();
+        if (keyActions != null)
+            foreach (var entry in keyActions)
+                if (entry != null && !string.IsNullOrWhiteSpace(entry.name))
+                    actions.Add(new GameActionDefinition(entry.name, entry.name, ActionTrigger.Press, new InputBinding(entry.key)));
+        AddWheel(scrollUpEntries, true);
+        AddWheel(scrollDownEntries, false);
+        return actions;
+        void AddWheel(ScrollEntry[] entries, bool up)
         {
-            action.ProcessUpdate();
+            if (entries == null) return;
+            foreach (var entry in entries)
+            {
+                if (string.IsNullOrWhiteSpace(entry.name)) continue;
+                actions.RemoveAll(a => a.Id == entry.name);
+                actions.Add(new GameActionDefinition(entry.name, entry.name, ActionTrigger.Hold, InputBinding.Wheel(up)));
+            }
         }
     }
-
-    /// <summary> Получить любое действие ввода по имени (клавиатура или прокрутка) </summary>
-    public IInputAction GetAction(string actionName)
-    {
-        actionsMap.TryGetValue(actionName, out var action);
-        return action;
-    }
-
-    /// <summary> Получить действие клавиатуры (для обратной совместимости) </summary>
-    //public KeyAction GetKeyAction(string actionName)
-    //{
-    //    return GetAction(actionName) as KeyAction;
-    //}
 }

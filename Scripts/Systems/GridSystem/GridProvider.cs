@@ -1,247 +1,298 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
-using UnityEditor;
+using System.Collections.ObjectModel;
 using UnityEngine;
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
 
+/// <summary>
+/// Индекс статической сетки и запросы к её графу. XZ отсчитываются от Transform провайдера,
+/// Y — от мирового нуля. Геометрия сохраняется в сцене, словари восстанавливаются лениво.
+/// </summary>
 public class GridProvider : Manager, IGridProvider, IPathFinder<GridCell>
 {
-    [SerializeField] private float cellSize = 1f;
+    [Min(0.001f)] [SerializeField] private float cellSize = 1f;
     [SerializeField] private Transform cellsContainer;
-
-    private Dictionary<Vector3Int, GridCell> grid = new();
-    private Dictionary<Vector2Int, List<GridCell>> cellsByXZ = new();
+    private readonly Dictionary<Vector3Int, GridCell> grid = new();
+    private readonly Dictionary<Vector2Int, List<GridCell>> cellsByXZ = new();
+    private ReadOnlyCollection<IGridCell> allCells;
+    private bool populated;
 
     public event Action<IGridCell> OnCellPointerEnter;
     public event Action<IGridCell> OnCellPointerExit;
     public event Action<IGridCell> OnCellPointerClick;
-
     public float CellSize => cellSize;
-    public IReadOnlyCollection<IGridCell> AllCells => grid.Values.Where(c => c.IsValid).ToList().AsReadOnly();
 
-    private void Start()
+    /// <summary>Read-only снимок; повторное чтение не выделяет память до изменения состава сетки.</summary>
+    public IReadOnlyCollection<IGridCell> AllCells
     {
-        EnsureGridPopulated();
+        get
+        {
+            EnsureGridPopulated();
+            if (allCells == null)
+            {
+                var cells = new List<IGridCell>(grid.Count);
+                foreach (var cell in grid.Values) if (cell != null && cell.IsValid) cells.Add(cell);
+                allCells = cells.AsReadOnly();
+            }
+            return allCells;
+        }
     }
 
-    /// <summary> Если словарь пуст, заполняет его из cellsContainer. </summary>
+    public override void Init() { EnsureGridPopulated(); base.Init(); }
+    private void Start() => EnsureGridPopulated();
+    private void OnDestroy() => ClearAllCells();
+
     private void EnsureGridPopulated()
     {
-        if (grid.Count > 0 || cellsContainer == null) return;
-        var cells = cellsContainer.GetComponentsInChildren<GridCell>();
-        foreach (var cell in cells)
-        {
-            if (cell != null && cell.IsValid)
-            {
-                RegisterCell(cell);
-                // Подписка на события (если ещё не подписана) – делаем безопасно
-                cell.OnCellPointerEnterEvent -= OnCellPointerEnter;
-                cell.OnCellPointerEnterEvent += OnCellPointerEnter;
-                cell.OnCellPointerExitEvent -= OnCellPointerExit;
-                cell.OnCellPointerExitEvent += OnCellPointerExit;
-                cell.OnCellPointerClickEvent -= OnCellPointerClick;
-                cell.OnCellPointerClickEvent += OnCellPointerClick;
-            }
-        }
+        if (!populated) RebuildIndex();
     }
 
-    // Остальные методы без изменений (RegisterCell, RemoveCell, ClearAllCells, IGridProvider, IPathFinder, WorldToGridPos и т.д.)
-
-    private void OnDrawGizmosSelected()
+    /// <summary>Читает активные ячейки контейнера после ручных правок/Undo; соседей не пересчитывает.</summary>
+    public void RebuildIndex()
     {
-        // ПЕРЕД ОТРИСОВКОЙ: лениво заполняем словарь, если он пуст
-        EnsureGridPopulated();
-
-        if (grid.Count == 0) return;
-        var cam = SceneView.currentDrawingSceneView?.camera;
-        if (cam == null) return;
-        float maxDist = 30f;
-
-        Gizmos.color = Color.cyan;
-        foreach (var cell in grid.Values)
-        {
-            if (cell == null || !cell.IsValid) continue;
-            Vector3 pos = cell.GetWorldPosition(cellSize);
-            if (Vector3.Distance(cam.transform.position, pos) > maxDist) continue;
-            Gizmos.DrawSphere(pos, 0.1f);
-        }
+        ClearAllCells();
+        if (cellsContainer != null)
+            foreach (var cell in cellsContainer.GetComponentsInChildren<GridCell>()) RegisterCell(cell);
     }
 
-    public void DrawConnections()
-    {
-        // ПЕРЕД ОТРИСОВКОЙ: лениво заполняем словарь, если он пуст
-        EnsureGridPopulated();
-
-        if (grid.Count == 0) return;
-        var cam = SceneView.currentDrawingSceneView?.camera;
-        if (cam == null) return;
-        float maxDist = 30f;
-        Handles.color = new Color(1, 1, 0, 0.5f);
-
-        foreach (var cell in grid.Values)
-        {
-            if (cell == null || !cell.IsValid) continue;
-            Vector3 pos = cell.GetWorldPosition(cellSize);
-            if (Vector3.Distance(cam.transform.position, pos) > maxDist) continue;
-
-            foreach (var neighbor in cell.Neighbors)
-            {
-                if (neighbor is not GridCell neighborCell) continue;
-                if (CompareGridPositions(cell.GridPosition, neighborCell.GridPosition) < 0)
-                {
-                    Vector3 neighborPos = neighborCell.GetWorldPosition(cellSize);
-                    Handles.DrawLine(pos, neighborPos);
-                }
-            }
-        }
-    }
-
-    // Генератор вызывает этот метод, чтобы добавить ячейку в словари
     public void RegisterCell(GridCell cell)
     {
-        if (cell == null || grid.ContainsKey(cell.GridPosition)) return;
-        grid[cell.GridPosition] = cell;
-        Vector2Int xz = new(cell.GridPosition.x, cell.GridPosition.z);
-        if (!cellsByXZ.ContainsKey(xz)) cellsByXZ[xz] = new List<GridCell>();
-        cellsByXZ[xz].Add(cell);
+        EnsureGridPopulated();
+        if (cell == null || !cell.IsValid || grid.ContainsKey(cell.GridPosition)) return;
+        if (cell.Owner != null && cell.Owner != this) cell.Owner.RemoveCell(cell);
+        grid.Add(cell.GridPosition, cell);
+        var xz = new Vector2Int(cell.GridPosition.x, cell.GridPosition.z);
+        if (!cellsByXZ.TryGetValue(xz, out var column)) cellsByXZ.Add(xz, column = new List<GridCell>());
+        column.Add(cell);
+        cell.Owner = this;
+        // Посредники читают текущий event, а не копируют список слушателей в момент регистрации.
+        cell.OnCellPointerEnterEvent += ForwardEnter;
+        cell.OnCellPointerExitEvent += ForwardExit;
+        cell.OnCellPointerClickEvent += ForwardClick;
+        allCells = null;
     }
 
-    // Ячейка сама вызывает этот метод при OnDestroy
     public void RemoveCell(GridCell cell)
     {
-        if (cell == null) return;
+        // Чужой дубликат координат не должен удалять зарегистрированный объект.
+        if (ReferenceEquals(cell, null) || !grid.TryGetValue(cell.GridPosition, out var registered) ||
+            !ReferenceEquals(registered, cell)) return;
         grid.Remove(cell.GridPosition);
-        Vector2Int xz = new(cell.GridPosition.x, cell.GridPosition.z);
-        if (cellsByXZ.TryGetValue(xz, out List<GridCell> list))
+        var xz = new Vector2Int(cell.GridPosition.x, cell.GridPosition.z);
+        if (cellsByXZ.TryGetValue(xz, out var column))
         {
-            list.Remove(cell);
-            if (list.Count == 0) cellsByXZ.Remove(xz);
+            column.Remove(cell);
+            if (column.Count == 0) cellsByXZ.Remove(xz);
         }
+        Detach(cell);
+        allCells = null;
     }
 
-    // Очистка всех данных (объекты удаляет генератор)
+    /// <summary>Очищает индекс и подписки, но не объекты. До RebuildIndex автопоиска больше нет.</summary>
     public void ClearAllCells()
     {
+        foreach (var cell in grid.Values) if (!ReferenceEquals(cell, null)) Detach(cell);
         grid.Clear();
         cellsByXZ.Clear();
+        allCells = null;
+        populated = true;
     }
 
-    // Реализация IGridProvider
-    public IGridCell GetCellAt(Vector3 worldPos)
+    private void Detach(GridCell cell)
     {
-        Vector3Int gridPos = WorldToGridPos(worldPos);
-        grid.TryGetValue(gridPos, out GridCell cell);
-        return cell;
+        cell.OnCellPointerEnterEvent -= ForwardEnter;
+        cell.OnCellPointerExitEvent -= ForwardExit;
+        cell.OnCellPointerClickEvent -= ForwardClick;
+        if (ReferenceEquals(cell.Owner, this)) cell.Owner = null;
     }
 
-    public IGridCell GetClosestCell(Vector3 worldPos)
-    {
-        Vector3Int gridPos = WorldToGridPos(worldPos);
-        if (grid.TryGetValue(gridPos, out GridCell cell)) return cell;
+    private void ForwardEnter(IGridCell cell) => OnCellPointerEnter?.Invoke(cell);
+    private void ForwardExit(IGridCell cell) => OnCellPointerExit?.Invoke(cell);
+    private void ForwardClick(IGridCell cell) => OnCellPointerClick?.Invoke(cell);
 
+    public IGridCell GetCellAt(Vector3 worldPosition)
+        => GetCellAt(WorldToGridPos(worldPosition));
+
+    /// <summary>Прямое разрешение сетевого адреса, без потери реальной высоты ячейки.</summary>
+    public IGridCell GetCellAt(Vector3Int gridPosition)
+    {
+        EnsureGridPopulated();
+        grid.TryGetValue(gridPosition, out var cell);
+        return cell != null && cell.IsValid ? cell : null;
+    }
+
+    public IGridCell GetClosestCell(Vector3 worldPosition)
+    {
+        EnsureGridPopulated();
         GridCell closest = null;
-        float minDist = float.MaxValue;
-        foreach (var c in grid.Values.Where(c => c.IsValid))
+        float minDistance = float.PositiveInfinity;
+        // Округлённая ячейка не обязательно ближайшая: WorldY отличается от GridPosition.y.
+        foreach (var cell in grid.Values)
         {
-            float dist = Vector3.Distance(worldPos, c.GetWorldPosition(cellSize));
-            if (dist < minDist) { minDist = dist; closest = c; }
+            if (cell == null || !cell.IsValid) continue;
+            float distance = (worldPosition - cell.GetWorldPosition(cellSize)).sqrMagnitude;
+            if (distance < minDistance) { minDistance = distance; closest = cell; }
         }
         return closest;
     }
 
-    public List<IGridCell> GetCellsInRadius(Vector3 worldCenter, float radius)
+    public List<IGridCell> GetCellsInRadius(Vector3 center, float radius)
     {
-        List<IGridCell> result = new();
-        Vector3Int center = WorldToGridPos(worldCenter);
-        int intRadius = Mathf.CeilToInt(radius / cellSize);
+        var result = new List<IGridCell>();
+        GetCellsInRadius(center, radius, result);
+        return result;
+    }
 
-        for (int x = -intRadius; x <= intRadius; x++)
+    /// <summary>
+    /// Заполняет переиспользуемый список. Сохранена семантика ромба:
+    /// |dx|+|dz| &lt;= ceil(radius/CellSize), все этажи, без проверки достижимости.
+    /// </summary>
+    public void GetCellsInRadius(Vector3 center, float radius, List<IGridCell> result)
+    {
+        if (result == null) throw new ArgumentNullException(nameof(result));
+        result.Clear();
+        if (float.IsNaN(radius) || float.IsInfinity(radius)) throw new ArgumentOutOfRangeException(nameof(radius));
+        if (radius < 0) return;
+        EnsureGridPopulated();
+        var position = WorldToGridPos(center);
+        double steps = Math.Ceiling((double)radius / cellSize);
+        // Для большого радиуса выгоднее обойти существующие колонки, а не пустые координаты.
+        if (steps * steps * 2 + steps * 2 + 1 > cellsByXZ.Count)
         {
-            for (int z = -intRadius; z <= intRadius; z++)
-            {
-                if (Mathf.Abs(x) + Mathf.Abs(z) > intRadius) continue;
-                Vector2Int checkXZ = new(center.x + x, center.z + z);
-                if (cellsByXZ.TryGetValue(checkXZ, out var cells))
-                    result.AddRange(cells.Where(c => c.IsValid));
-            }
+            foreach (var pair in cellsByXZ)
+                if (Math.Abs((long)pair.Key.x - position.x) + Math.Abs((long)pair.Key.y - position.z) <= steps)
+                    AddValid(pair.Value, result);
+            return;
+        }
+        int range = (int)steps;
+        for (int x = -range; x <= range; x++)
+        {
+            int depth = range - Math.Abs(x);
+            for (int z = -depth; z <= depth; z++)
+                if (cellsByXZ.TryGetValue(new Vector2Int(position.x + x, position.z + z), out var column))
+                    AddValid(column, result);
+        }
+    }
+
+    private static void AddValid(List<GridCell> cells, List<IGridCell> result)
+    {
+        foreach (var cell in cells) if (cell != null && cell.IsValid) result.Add(cell);
+    }
+
+    /// <summary>Все достижимые ячейки до order рёбер включительно, без исходной, а не только последнее кольцо.</summary>
+    public List<IGridCell> GetNeighborsOfOrder(IGridCell cell, int order)
+    {
+        EnsureGridPopulated();
+        var result = new List<IGridCell>();
+        if (order <= 0 || cell is not GridCell start || !Contains(start)) return result;
+        var visited = new HashSet<GridCell> { start };
+        var queue = new Queue<GridCell>();
+        queue.Enqueue(start);
+        for (int depth = 0; depth < order && queue.Count != 0; depth++)
+        {
+            int count = queue.Count;
+            while (count-- > 0)
+                foreach (var neighbor in queue.Dequeue().NeighborCells)
+                    if (Contains(neighbor) && visited.Add(neighbor))
+                    {
+                        result.Add(neighbor);
+                        queue.Enqueue(neighbor);
+                    }
         }
         return result;
     }
 
-    public List<IGridCell> GetNeighborsOfOrder(IGridCell cell, int order)
-    {
-        if (cell == null || order < 0) return new List<IGridCell>();
-        HashSet<IGridCell> visited = new() { cell };
-        List<IGridCell> frontier = new() { cell };
-
-        for (int i = 0; i < order; i++)
-        {
-            List<IGridCell> next = new();
-            foreach (var c in frontier)
-            {
-                foreach (var n in c.Neighbors)
-                {
-                    if (!visited.Contains(n))
-                    {
-                        visited.Add(n);
-                        next.Add(n);
-                    }
-                }
-            }
-            frontier = next;
-        }
-        visited.Remove(cell);
-        return visited.ToList();
-    }
-
-    // Реализация IPathFinder<GridCell>
+    /// <summary>BFS: кратчайший путь по числу рёбер. null predicate разрешает все существующие связи.</summary>
     public List<GridCell> FindPath(GridCell start, GridCell end, Func<GridCell, GridCell, bool> predicate)
     {
-        if (start == null || end == null) return null;
-        var openSet = new Queue<GridCell>();
-        var cameFrom = new Dictionary<GridCell, GridCell>();
-        openSet.Enqueue(start);
-        cameFrom[start] = null;
-
-        while (openSet.Count > 0)
+        EnsureGridPopulated();
+        if (!Contains(start) || !Contains(end)) return null;
+        var queue = new Queue<GridCell>();
+        var previous = new Dictionary<GridCell, GridCell> { [start] = null };
+        queue.Enqueue(start);
+        while (queue.Count != 0)
         {
-            var current = openSet.Dequeue();
+            var current = queue.Dequeue();
             if (current == end)
             {
                 var path = new List<GridCell>();
-                while (current != null)
-                {
-                    path.Add(current);
-                    current = cameFrom[current];
-                }
+                for (; current != null; current = previous[current]) path.Add(current);
                 path.Reverse();
                 return path;
             }
-            foreach (var neighbor in current.Neighbors.OfType<GridCell>())
-            {
-                if (!cameFrom.ContainsKey(neighbor) && predicate(current, neighbor))
+            foreach (var neighbor in current.NeighborCells)
+                if (Contains(neighbor) && !previous.ContainsKey(neighbor) && (predicate == null || predicate(current, neighbor)))
                 {
-                    cameFrom[neighbor] = current;
-                    openSet.Enqueue(neighbor);
+                    previous.Add(neighbor, current);
+                    queue.Enqueue(neighbor);
                 }
-            }
         }
         return null;
     }
 
-    private Vector3Int WorldToGridPos(Vector3 worldPos) =>
-        new Vector3Int(
-            Mathf.RoundToInt((worldPos.x - transform.position.x) / cellSize),
-            Mathf.RoundToInt(worldPos.y / cellSize),
-            Mathf.RoundToInt((worldPos.z - transform.position.z) / cellSize)
-        );
+    private bool Contains(GridCell cell) => cell != null && cell.IsValid &&
+        grid.TryGetValue(cell.GridPosition, out var registered) && ReferenceEquals(cell, registered);
 
-    private int CompareGridPositions(Vector3Int a, Vector3Int b)
+    public Vector3Int WorldToGridPos(Vector3 worldPosition)
     {
-        int cmpX = a.x.CompareTo(b.x);
-        if (cmpX != 0) return cmpX;
-        int cmpY = a.y.CompareTo(b.y);
-        if (cmpY != 0) return cmpY;
-        return a.z.CompareTo(b.z);
+        ValidateCellSize();
+        var origin = transform.position;
+        return new Vector3Int(Mathf.RoundToInt((worldPosition.x - origin.x) / cellSize),
+            Mathf.RoundToInt(worldPosition.y / cellSize), Mathf.RoundToInt((worldPosition.z - origin.z) / cellSize));
+    }
+
+    /// <summary>Центр колонки с фактической высотой поверхности вместо округлённой GridPosition.y.</summary>
+    public Vector3 GridToWorldPos(Vector3Int position, float worldY)
+    {
+        ValidateCellSize();
+        var origin = transform.position;
+        return new Vector3(origin.x + position.x * cellSize, worldY, origin.z + position.z * cellSize);
+    }
+
+    private void ValidateCellSize()
+    {
+        if (!(cellSize > 0) || float.IsInfinity(cellSize)) throw new InvalidOperationException("Grid CellSize must be finite and positive.");
+    }
+
+#if UNITY_EDITOR
+    private void OnDrawGizmosSelected()
+    {
+        EnsureGridPopulated();
+        var camera = SceneView.currentDrawingSceneView?.camera;
+        if (camera == null) return;
+        var cameraPosition = camera.transform.position;
+        Gizmos.color = Color.cyan;
+        foreach (var cell in grid.Values)
+            if (cell != null && cell.IsValid && (cameraPosition - cell.transform.position).sqrMagnitude <= 900f)
+                Gizmos.DrawSphere(cell.transform.position, .1f);
+    }
+#endif
+
+    public void DrawConnections()
+    {
+#if UNITY_EDITOR
+        EnsureGridPopulated();
+        var camera = SceneView.currentDrawingSceneView?.camera;
+        if (camera == null) return;
+        var cameraPosition = camera.transform.position;
+        Handles.color = new Color(1, 1, 0, .5f);
+        foreach (var cell in grid.Values)
+        {
+            if (cell == null || !cell.IsValid || (cameraPosition - cell.transform.position).sqrMagnitude > 900f) continue;
+            foreach (var neighbor in cell.NeighborCells)
+                if (Contains(neighbor) && (CompareGridPositions(cell.GridPosition, neighbor.GridPosition) < 0 ||
+                    !neighbor.NeighborCells.Contains(cell))) Handles.DrawLine(cell.transform.position, neighbor.transform.position);
+        }
+#endif
+    }
+
+    private static int CompareGridPositions(Vector3Int a, Vector3Int b)
+    {
+        int value = a.x.CompareTo(b.x);
+        if (value != 0) return value;
+        value = a.y.CompareTo(b.y);
+        return value != 0 ? value : a.z.CompareTo(b.z);
     }
 }

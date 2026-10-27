@@ -9,7 +9,7 @@ using System.Collections.Generic;
 namespace Assets.Shared.Systems.InventorySystem.Core
 {
     /// <summary>
-    /// Негeneric marker позволяет обнаруживать разные инвентари в Data-graph
+    /// Generic marker позволяет обнаруживать разные инвентари в Data-graph
     /// через reflection, не зная тип их содержимого.
     /// </summary>
     public interface IInventory : ITrackable

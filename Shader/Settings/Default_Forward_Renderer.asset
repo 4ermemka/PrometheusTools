@@ -2,7 +2,7 @@
 %TAG !u! tag:unity3d.com,2011:
 --- !u!114 &-5100989527864777326
 MonoBehaviour:
-  m_ObjectHideFlags: 0
+  m_ObjectHideFlags: 1
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
@@ -56,8 +56,7 @@ MonoBehaviour:
   - {fileID: -5100989527864777326}
   - {fileID: 2282322725893558786}
   - {fileID: 2292834200994175746}
-  m_RendererFeatureMap: 92e5a1f40ca535b902d2af4b6d70ac1f02db1fcf8ec8d11f
-  m_UseNativeRenderPass: 0
+  m_RendererFeatureMap: 92e5a1f40ca535b902d2af4b6d70ac1f02db1fcf8ec8d11fl
   xrSystemData: {fileID: 0}
   postProcessData: {fileID: 11400000, guid: 41439944d30ece34e96484bdb6645b55, type: 2}
   m_AssetVersion: 3
@@ -85,9 +84,10 @@ MonoBehaviour:
   m_DepthTextureFormat: 0
   m_AccurateGbufferNormals: 0
   m_IntermediateTextureMode: 0
+  m_TileOnlyMode: 0
 --- !u!114 &2282322725893558786
 MonoBehaviour:
-  m_ObjectHideFlags: 0
+  m_ObjectHideFlags: 1
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
@@ -119,7 +119,7 @@ MonoBehaviour:
   sharedPixelationSettings: {fileID: 11400000, guid: 70f238b723d35964397fe85fda879e37, type: 2}
 --- !u!114 &2292834200994175746
 MonoBehaviour:
-  m_ObjectHideFlags: 0
+  m_ObjectHideFlags: 1
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}

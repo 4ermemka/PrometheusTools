@@ -15,5 +15,6 @@ public interface IGridCell
     Quaternion Rotation { get; }
     IEnumerable<IGridCell> Neighbors { get; }
     bool IsValid { get; }
+    /// <summary>Фактическая мировая позиция. GridCell берёт Transform; cellSize оставлен для совместимости.</summary>
     Vector3 GetWorldPosition(float cellSize);
 }

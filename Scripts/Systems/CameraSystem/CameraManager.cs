@@ -1,157 +1,61 @@
+using Shared.CameraSystem;
 using UnityEngine;
 
-[RequireComponent(typeof(Transform))]
+/// <summary>Применяет функции CameraDirector в LateUpdate. Геометрия и поведение находятся вне контроллера.</summary>
+[DefaultExecutionOrder(200), DisallowMultipleComponent, RequireComponent(typeof(IsometricCamera))]
 public class CameraManager : Manager
 {
-    private Transform RotationTransform => GetComponent<Transform>();
-
-    [Header("Основные ссылки")]
-    [SerializeField] private Transform FocusPoint;
-    [SerializeField] private Transform OffsetTransform;
-    [SerializeField] private Transform CameraTransform;
+    // Имя поля и GUID скрипта сохранены для Camera и ManagersHolder в существующей сцене.
     [SerializeField] private Camera Camera;
+    [SerializeField] private IsometricCamera defaultCamera;
+    private CameraDirector director;
 
-    [Header("Чувствительность мыши")]
-    [SerializeField, Range(0f, 1f)] private float Multiplier = 1f;
-
-    [Header("Зум")]
-    [SerializeField, Range(0f, 1f)] private float ZoomStep = 0.1f;
-    [SerializeField] private float ZoomSpeed = 4f;
-    [SerializeField] private float minZoom = 1f;          // <-- новый параметр
-    [SerializeField] private float maxZoom = 3f;          // <-- новый параметр
-    [SerializeField, Range(1f, 3f)] private float _zoomAmount;
-
-    [Header("Вращение")]
-    [SerializeField] private float RotationSpeed = 120f;
-
-    [Header("Следование за мышью")]
-    [SerializeField] private float CameraFollowSpeed = 15f;
-
-    [Header("Ортографическая камера")]
-    [SerializeField] private bool useOrthographic = true;
-    [SerializeField] private float minOrthoSize = 2f;     // максимальное приближение (зум 1)
-    [SerializeField] private float maxOrthoSize = 8f;     // максимальный обзор (зум 3)
-
-    [Header("Дуга камеры")]
-    [SerializeField] private float arcRadius = 15f;
-    [SerializeField, Range(0f, 90f)] private float maxTiltAngle = 75f;
-
-    // Внутренние переменные
-    private float _targetZoomAmount;
-    private float _targetYAngle;
-    private Vector3 _targetLocalPosition;
-
-    private void Start()
+    public Camera ControlledCamera => Camera;
+    public IsometricCamera DefaultCamera
     {
-        // Инициализируем текущее значение зума
-        _zoomAmount = maxZoom;
-        _targetZoomAmount = _zoomAmount;
-        _targetYAngle = RotationTransform.eulerAngles.y;
-        _targetLocalPosition = CameraTransform.localPosition;
-
-        ApplyCameraMode();
-        ApplyZoom();
-    }
-
-    private void ApplyCameraMode()
-    {
-        if (Camera != null)
-            Camera.orthographic = useOrthographic;
-    }
-
-    private void OnValidate()
-    {
-        // Реакция на изменения в инспекторе
-        if (Camera == null)
-            Camera = GetComponent<Camera>();
-        ApplyCameraMode();
-        ApplyZoom();
-    }
-
-    private void Update()
-    {
-        // Плавный зум
-        if (!Mathf.Approximately(_zoomAmount, _targetZoomAmount))
+        get
         {
-            _zoomAmount = Mathf.MoveTowards(_zoomAmount, _targetZoomAmount, ZoomSpeed * Time.deltaTime);
-            ApplyZoom();
-        }
-
-        // Плавное вращение
-        float currentYAngle = RotationTransform.eulerAngles.y;
-        float newYAngle = Mathf.MoveTowardsAngle(currentYAngle, _targetYAngle, RotationSpeed * Time.deltaTime);
-        RotationTransform.rotation = Quaternion.Euler(0f, newYAngle, 0f);
-        RotationTransform.position = FocusPoint.position;
-
-        // Следование за мышью
-        Vector3 camForward = CameraTransform.forward;
-        float fixedDepth = Vector3.Dot(FocusPoint.position - CameraTransform.position, camForward);
-        Plane plane = new Plane(camForward, FocusPoint.position);
-        Ray ray = Camera.ScreenPointToRay(Input.mousePosition);
-        if (plane.Raycast(ray, out float enter))
-        {
-            Vector3 mouseWorld = ray.GetPoint(enter);
-            Vector3 midPoint = (FocusPoint.position + mouseWorld) * 0.5f;
-            Vector3 desiredWorldPos = midPoint - camForward * fixedDepth;
-            Vector3 desiredLocalOffset = Quaternion.Inverse(OffsetTransform.rotation) *
-                                         (desiredWorldPos - OffsetTransform.position);
-            desiredLocalOffset.z = 0f;
-            _targetLocalPosition = desiredLocalOffset * Multiplier;
-        }
-
-        if (CameraFollowSpeed > 0f)
-            CameraTransform.localPosition = Vector3.Lerp(CameraTransform.localPosition, _targetLocalPosition,
-                                                         CameraFollowSpeed * Time.deltaTime);
-        else
-            CameraTransform.localPosition = _targetLocalPosition;
-    }
-
-    private void ApplyZoom()
-    {
-        float t = 1f - Mathf.InverseLerp(minZoom, maxZoom, _zoomAmount);
-        float tiltAngle = Mathf.Lerp(0f, maxTiltAngle * Mathf.Deg2Rad, t);
-
-        // Позиция на дуге
-        float y = arcRadius * Mathf.Cos(tiltAngle);
-        float zOffset = -arcRadius * Mathf.Sin(tiltAngle);
-        OffsetTransform.localPosition = new Vector3(0f, y, zOffset);
-
-        // Наклон камеры: при tiltAngle = 0 смотрим вертикально вниз (pitch = 90°),
-        // при tiltAngle = maxTiltAngle — почти горизонтально (pitch = 90° - maxTiltAngle°)
-        float pitch = 90f - tiltAngle * Mathf.Rad2Deg;
-        OffsetTransform.localRotation = Quaternion.Euler(pitch, 0f, 0f);
-
-        // Размер orthographicSize
-        if (Camera != null && Camera.orthographic)
-        {
-            Camera.orthographicSize = Mathf.Lerp(maxOrthoSize, minOrthoSize, t);
+            if (defaultCamera == null) defaultCamera = GetComponent<IsometricCamera>();
+            return defaultCamera;
         }
     }
+    public CameraDirector Director => director ?? (director = new CameraDirector(DefaultCamera.GetPosition, DefaultCamera.GetLookAt));
 
-    public void ZoomOut()
+    public void Configure(Camera camera, IsometricCamera behaviour)
     {
-        _targetZoomAmount = Mathf.Clamp(_targetZoomAmount - ZoomStep, minZoom, maxZoom);
+        if (camera == null) throw new System.ArgumentNullException(nameof(camera));
+        if (behaviour == null) throw new System.ArgumentNullException(nameof(behaviour));
+        director?.Dispose();
+        director = null;
+        Camera = camera;
+        defaultCamera = behaviour;
     }
 
-    public void ZoomIn()
+    public void SetFocusPoint(Transform point) => DefaultCamera.Focus = point;
+    public void Orbit(float direction)
     {
-        _targetZoomAmount = Mathf.Clamp(_targetZoomAmount + ZoomStep, minZoom, maxZoom);
+        if (Director.IsDefault) DefaultCamera.Orbit(direction);
     }
 
-    public void RotateLeft(int amount)
+    private void LateUpdate() => Tick(Time.deltaTime);
+    public void Tick(float deltaTime)
     {
-        _targetYAngle += amount;
-        _targetYAngle = Mathf.Repeat(_targetYAngle, 360f);
+        if (Camera == null) Camera = GetComponentInChildren<Camera>();
+        if (Camera == null) return;
+        var activeDirector = Director;
+        DefaultCamera.Tick(deltaTime, activeDirector.IsDefault);
+        activeDirector.Evaluate(out var position, out var lookAt);
+        var direction = lookAt - position;
+        // Совпавшие точки допустимы: сохраняем последнюю ориентацию вместо LookRotation(0).
+        var rotation = direction.sqrMagnitude > 0.000001f
+            ? Quaternion.LookRotation(direction, Vector3.up) : Camera.transform.rotation;
+        Camera.transform.SetPositionAndRotation(position, rotation);
     }
 
-    public void RotateRight(int amount)
+    private void OnDisable()
     {
-        _targetYAngle -= amount;
-        _targetYAngle = Mathf.Repeat(_targetYAngle, 360f);
+        director?.Reset();
+        if (defaultCamera != null) defaultCamera.ClearInput();
     }
-
-    public void SetFocusPoint(Transform newFocusPoint)
-    {
-        FocusPoint = newFocusPoint;
-    }
+    private void OnDestroy() => director?.Dispose();
 }

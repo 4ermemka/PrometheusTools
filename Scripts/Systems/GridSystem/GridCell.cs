@@ -6,7 +6,7 @@ using UnityEngine.EventSystems;
 [RequireComponent(typeof(Selectable))]
 public class GridCell : MonoBehaviour, IGridCell, IPointerEnterHandler, IPointerExitHandler, IPointerClickHandler
 {
-    // Собственные события, которые пробрасывают холдеру
+    // Провайдер подписывает постоянные методы-посредники, поэтому поздние подписчики тоже получают события.
     public Action<IGridCell> OnCellPointerEnterEvent { get; set; }
     public Action<IGridCell> OnCellPointerExitEvent { get; set; }
     public Action<IGridCell> OnCellPointerClickEvent { get; set; }
@@ -20,7 +20,7 @@ public class GridCell : MonoBehaviour, IGridCell, IPointerEnterHandler, IPointer
     [SerializeField] private Quaternion rotation = Quaternion.identity;
     [SerializeField] private bool isValid;
 
-    // Единый список соседей (заполняется через SetNeighbors)
+    // Направленный граф; генератор выбирает до одного соседа в каждом из четырёх направлений.
     [SerializeField] private List<GridCell> neighbours = new();
 
     public Vector3Int GridPosition => gridPosition;
@@ -30,26 +30,39 @@ public class GridCell : MonoBehaviour, IGridCell, IPointerEnterHandler, IPointer
 
     public IEnumerable<IGridCell> Neighbors => neighbours;
 
-    public ISelectable Selection => GetComponent<Selectable>();
+    private Selectable selection;
+    internal GridProvider Owner { get; set; }
+    internal List<GridCell> NeighborCells => neighbours;
 
-    public Vector3 GetWorldPosition(float cellSize) =>
-        new Vector3(gridPosition.x * cellSize, worldY, gridPosition.z * cellSize);
+    public ISelectable Selection => selection != null ? selection : selection = GetComponent<Selectable>();
+
+    // Сигнатура сохранена для IGridCell. Transform уже учитывает смещение сетки и точную высоту поверхности.
+    public Vector3 GetWorldPosition(float cellSize) => transform.position;
 
     public void Initialize(Vector3Int pos, float y, Quaternion rot, bool valid)
     {
+        var owner = Owner;
+        if (owner != null) owner.RemoveCell(this);
         gridPosition = pos;
         worldY = y;
         rotation = rot;
         isValid = valid;
         name = $"Cell_{pos.x}_{pos.y}_{pos.z}";
         transform.rotation = rot;
+        if (owner != null) owner.RegisterCell(this);
     }
 
-    // Новый метод: принимает список соседей (заменил старый SetNeighbors с 4 параметрами)
+    // Копирует список; временный буфер генератора можно переиспользовать.
     public void SetNeighbors(List<GridCell> newNeighbours)
     {
+        if (ReferenceEquals(neighbours, newNeighbours)) return;
         neighbours.Clear();
         if (newNeighbours != null)
             neighbours.AddRange(newNeighbours);
+    }
+
+    private void OnDestroy()
+    {
+        if (Owner != null) Owner.RemoveCell(this);
     }
 }

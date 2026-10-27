@@ -1,7 +1,14 @@
 using System;
 using System.Collections.Generic;
 using UnityEngine;
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
 
+/// <summary>
+/// Строит статическую сетку по коллайдерам. Сначала проверяет конфигурацию и границы,
+/// затем заменяет ячейки. Промежуточные raycast-буферы переиспользуются между колонками.
+/// </summary>
 public class GridGenerator : MonoBehaviour
 {
     [Header("References")]
@@ -12,190 +19,220 @@ public class GridGenerator : MonoBehaviour
 
     [Header("Settings")]
     [SerializeField] private float heightOffset = 0.05f;
-    [SerializeField] private float verticalMergeThreshold = 1.5f;
-    [SerializeField] private float neighborHeightThreshold = 1.5f;
+    [Min(0)] [SerializeField] private float verticalMergeThreshold = 1.5f;
+    [Min(0)] [SerializeField] private float neighborHeightThreshold = 1.5f;
     [SerializeField] private LayerMask scanLayerMask = ~0;
-    [SerializeField] private float maxSlopeAngle = 45f;
-    [SerializeField] private float minClearanceHeight = 2.0f;
-    [SerializeField] private float clearanceCheckRadius = 0.1f;
-    [SerializeField] private float clearanceRayOffset = 0.1f;
+    [Range(0, 90)] [SerializeField] private float maxSlopeAngle = 45f;
+    [Min(0)] [SerializeField] private float minClearanceHeight = 2.0f;
+    [Min(0)] [SerializeField] private float clearanceCheckRadius = 0.1f;
+    [Min(0)] [SerializeField] private float clearanceRayOffset = 0.1f;
     [SerializeField] private LayerMask obstacleLayerMask = 0;
+    [Min(1)] [SerializeField] private int maxScanColumns = 1000000;
 
-    private Dictionary<Vector3Int, GridCell> generatedCells = new();
-    private Dictionary<Vector2Int, List<RaycastHit>> hitsByXZ = new();
-    private Collider[] targetCollidersCache;
+    private readonly Dictionary<Vector3Int, GridCell> generatedCells = new();
+    private readonly Dictionary<Vector2Int, List<GridCell>> columns = new();
+    private readonly HashSet<Collider> targetColliders = new();
+    private readonly List<GridCell> neighborBuffer = new(4);
+    private RaycastHit[] hitBuffer = new RaycastHit[16];
+    private static readonly IComparer<RaycastHit> HighestFirst =
+        Comparer<RaycastHit>.Create((a, b) => b.point.y.CompareTo(a.point.y));
 
     public void GenerateGrid()
     {
-        ClearExisting();
         if (!ValidateReferences()) return;
-
-        var bounds = CalculateBounds();
-        Vector3Int min = WorldToGridPos(bounds.min);
-        Vector3Int max = WorldToGridPos(bounds.max);
+        // bounds и физика должны видеть позиции после изменений Transform в этом же кадре.
+        Physics.SyncTransforms();
+        if (!CollectTargets(out var bounds))
+        {
+            Debug.LogWarning("Grid: no active non-trigger colliders in TargetsContainer matching ScanLayerMask. Existing grid retained.", this);
+            return;
+        }
+        var min = gridHolder.WorldToGridPos(bounds.min);
+        var max = gridHolder.WorldToGridPos(bounds.max);
+        double columnCount = ((long)max.x - min.x + 1d) * ((long)max.z - min.z + 1d);
+        if (min.x == int.MinValue || min.z == int.MinValue || max.x == int.MaxValue || max.z == int.MaxValue ||
+            min.x > max.x || min.z > max.z || columnCount > maxScanColumns)
+        {
+            targetColliders.Clear();
+            Debug.LogError("Grid: scan area exceeds MaxScanColumns or supported coordinates. Existing grid retained.", this);
+            return;
+        }
         float rayStartY = bounds.max.y + 10f;
-        float totalDistance = rayStartY - bounds.min.y + 10f;
-
-        LayerMask obstacleMask = obstacleLayerMask.value != 0 ? obstacleLayerMask : scanLayerMask;
-        targetCollidersCache = targetsContainer.GetComponentsInChildren<Collider>();
-
-        RaycastHit[] hitBuffer = new RaycastHit[10];
-        for (int x = min.x; x <= max.x; x++)
+        float distance = rayStartY - bounds.min.y + 10f;
+        float slopeCosine = Mathf.Cos(maxSlopeAngle * Mathf.Deg2Rad);
+        float mergeDistance = gridHolder.CellSize * verticalMergeThreshold;
+        int obstacleMask = obstacleLayerMask.value != 0 ? obstacleLayerMask.value : scanLayerMask.value;
+#if UNITY_EDITOR
+        if (!Application.isPlaying) Undo.IncrementCurrentGroup();
+        int undoGroup = Undo.GetCurrentGroup();
+        if (!Application.isPlaying) Undo.SetCurrentGroupName("Generate Grid");
+#endif
+        ClearExisting();
+        try
         {
-            for (int z = min.z; z <= max.z; z++)
-            {
-                Vector3 origin = GridToWorldPos(new Vector3Int(x, 0, z)) + Vector3.up * rayStartY;
-                int hitCount = Physics.RaycastNonAlloc(origin, Vector3.down, hitBuffer, totalDistance, scanLayerMask);
-                if (hitCount == 0) continue;
-
-                var validHits = new List<RaycastHit>();
-                for (int i = 0; i < hitCount; i++)
+            for (int x = min.x; x <= max.x; x++)
+                for (int z = min.z; z <= max.z; z++)
                 {
-                    var hit = hitBuffer[i];
-                    if (!IsTargetChild(hit.transform) || AngleTooSteep(hit.normal)) continue;
-                    validHits.Add(hit);
+                    var origin = gridHolder.GridToWorldPos(new Vector3Int(x, 0, z), rayStartY);
+                    int count = ScanColumn(origin, distance);
+                    Array.Sort(hitBuffer, 0, count, HighestFirst);
+                    float lastY = float.PositiveInfinity;
+                    for (int i = 0; i < count; i++)
+                    {
+                        var hit = hitBuffer[i];
+                        if (!targetColliders.Contains(hit.collider) || hit.normal.y < slopeCosine) continue;
+                        float y = hit.point.y + heightOffset;
+                        if (lastY - y < mergeDistance || !ValidateClearance(hit, obstacleMask)) continue;
+                        var world = gridHolder.GridToWorldPos(new Vector3Int(x, 0, z), y);
+                        var position = gridHolder.WorldToGridPos(world);
+                        // Несколько поверхностей могут округлиться в один ключ даже при mergeThreshold = 0.
+                        if (generatedCells.ContainsKey(position)) continue;
+                        var cell = Instantiate(cellPrefab, world, Quaternion.FromToRotation(Vector3.up, hit.normal), cellsContainer);
+                        cell.Initialize(position, y, cell.transform.rotation, true);
+#if UNITY_EDITOR
+                        if (!Application.isPlaying) Undo.RegisterCreatedObjectUndo(cell.gameObject, "Create Grid Cell");
+#endif
+                        generatedCells.Add(position, cell);
+                        var xz = new Vector2Int(x, z);
+                        if (!columns.TryGetValue(xz, out var column)) columns.Add(xz, column = new List<GridCell>());
+                        column.Add(cell);
+                        gridHolder.RegisterCell(cell);
+                        lastY = y;
+                    }
                 }
-                validHits.Sort((a, b) => b.point.y.CompareTo(a.point.y));
-                if (validHits.Count > 0)
-                    hitsByXZ[new Vector2Int(x, z)] = validHits;
-            }
+            SetAllNeighbors();
         }
-
-        foreach (var kvp in hitsByXZ)
+        finally
         {
-            Vector2Int xz = kvp.Key;
-            var hits = kvp.Value;
-            float lastY = float.NegativeInfinity;
-
-            foreach (var hit in hits)
-            {
-                float y = hit.point.y + heightOffset;
-                if (lastY > float.NegativeInfinity && lastY - y < gridHolder.CellSize * verticalMergeThreshold)
-                    continue;
-
-                Vector3 worldPos = new Vector3(xz.x * gridHolder.CellSize + transform.position.x, y, xz.y * gridHolder.CellSize + transform.position.z);
-                Vector3Int gridPos = WorldToGridPos(worldPos);
-
-                if (!ValidateClearance(hit, obstacleMask)) continue;
-
-                Quaternion rot = Quaternion.FromToRotation(Vector3.up, hit.normal);
-                GridCell cell = Instantiate(cellPrefab, cellsContainer);
-                cell.transform.position = worldPos;
-                cell.Initialize(gridPos, y, rot, true);
-                generatedCells[gridPos] = cell;
-                gridHolder.RegisterCell(cell);   // <-- РАСКОММЕНТИРОВАНО
-
-                lastY = y;
-            }
+            generatedCells.Clear();
+            columns.Clear();
+            targetColliders.Clear();
+#if UNITY_EDITOR
+            if (!Application.isPlaying) Undo.CollapseUndoOperations(undoGroup);
+#endif
         }
-
-        SetAllNeighbors();
-        hitsByXZ.Clear();
-        generatedCells.Clear();
     }
 
-    private bool ValidateClearance(RaycastHit hit, LayerMask obstacleMask)
+    private int ScanColumn(Vector3 origin, float distance)
     {
-        Vector3 rayStart = hit.point + Vector3.up * clearanceRayOffset;
-        if (Physics.SphereCast(rayStart, clearanceCheckRadius, Vector3.up, out RaycastHit upHit, minClearanceHeight, obstacleMask))
+        // NonAlloc не сообщает об обрезании результата: заполненный буфер надо увеличить и повторить запрос.
+        while (true)
         {
-            if (upHit.collider != hit.collider) return false;
+            int count = Physics.RaycastNonAlloc(origin, Vector3.down, hitBuffer, distance, scanLayerMask, QueryTriggerInteraction.Ignore);
+            if (count < hitBuffer.Length) return count;
+            Array.Resize(ref hitBuffer, checked(hitBuffer.Length * 2));
         }
-        return true;
+    }
+
+    private bool CollectTargets(out Bounds bounds)
+    {
+        targetColliders.Clear();
+        bounds = default;
+        foreach (var collider in targetsContainer.GetComponentsInChildren<Collider>())
+        {
+            if (!collider.enabled || collider.isTrigger || (scanLayerMask.value & (1 << collider.gameObject.layer)) == 0) continue;
+            if (targetColliders.Count == 0) bounds = collider.bounds;
+            else bounds.Encapsulate(collider.bounds);
+            targetColliders.Add(collider);
+        }
+        return targetColliders.Count != 0;
+    }
+
+    private bool ValidateClearance(RaycastHit hit, int obstacleMask)
+    {
+        if (minClearanceHeight <= 0) return true;
+        var origin = hit.point + Vector3.up * clearanceRayOffset;
+        bool blocked = clearanceCheckRadius > 0
+            ? Physics.SphereCast(origin, clearanceCheckRadius, Vector3.up, out var obstruction,
+                minClearanceHeight, obstacleMask, QueryTriggerInteraction.Ignore)
+            : Physics.Raycast(origin, Vector3.up, out obstruction, minClearanceHeight, obstacleMask, QueryTriggerInteraction.Ignore);
+        return !blocked || obstruction.collider == hit.collider;
     }
 
     private void SetAllNeighbors()
     {
         foreach (var cell in generatedCells.Values)
         {
-            Vector2Int xz = new(cell.GridPosition.x, cell.GridPosition.z);
-            // Формируем список соседей из четырёх направлений
-            List<GridCell> neighbourList = new List<GridCell>(4);
-            AddIfNotNull(neighbourList, FindBestNeighbor(xz + Vector2Int.up, cell.WorldY));
-            AddIfNotNull(neighbourList, FindBestNeighbor(xz + Vector2Int.down, cell.WorldY));
-            AddIfNotNull(neighbourList, FindBestNeighbor(xz + Vector2Int.left, cell.WorldY));
-            AddIfNotNull(neighbourList, FindBestNeighbor(xz + Vector2Int.right, cell.WorldY));
-            cell.SetNeighbors(neighbourList);
+            var xz = new Vector2Int(cell.GridPosition.x, cell.GridPosition.z);
+            neighborBuffer.Clear();
+            AddNeighbor(xz + Vector2Int.up, cell.WorldY);
+            AddNeighbor(xz + Vector2Int.down, cell.WorldY);
+            AddNeighbor(xz + Vector2Int.left, cell.WorldY);
+            AddNeighbor(xz + Vector2Int.right, cell.WorldY);
+#if UNITY_EDITOR
+            if (!Application.isPlaying) Undo.RecordObject(cell, "Connect Grid Cell");
+#endif
+            cell.SetNeighbors(neighborBuffer);
         }
     }
 
-    private void AddIfNotNull(List<GridCell> list, GridCell cell)
+    private void AddNeighbor(Vector2Int xz, float y)
     {
-        if (cell != null) list.Add(cell);
-    }
-
-    private GridCell FindBestNeighbor(Vector2Int xz, float currentY)
-    {
-        if (!hitsByXZ.TryGetValue(xz, out var hits)) return null;
+        if (!columns.TryGetValue(xz, out var column)) return;
         GridCell best = null;
-        float minDiff = float.MaxValue;
-        foreach (var hit in hits)
+        float bestDifference = float.PositiveInfinity;
+        float limit = gridHolder.CellSize * neighborHeightThreshold;
+        foreach (var cell in column)
         {
-            Vector3 world = hit.point + Vector3.up * heightOffset;
-            Vector3Int pos = WorldToGridPos(world);
-            if (generatedCells.TryGetValue(pos, out var cell) && cell.IsValid)
-            {
-                float diff = Mathf.Abs(cell.WorldY - currentY);
-                if (diff <= gridHolder.CellSize * neighborHeightThreshold && diff < minDiff)
-                {
-                    minDiff = diff;
-                    best = cell;
-                }
-            }
+            float difference = Mathf.Abs(cell.WorldY - y);
+            if (difference <= limit && difference < bestDifference) { best = cell; bestDifference = difference; }
         }
-        return best;
+        if (best != null) neighborBuffer.Add(best);
     }
 
+    /// <summary>Удаляет только GridCell в выделенном контейнере. В Play выключает их до отложенного Destroy.</summary>
     public void ClearExisting()
     {
+        if (gridHolder == null) { Debug.LogError("GridHolder not assigned!", this); return; }
         gridHolder.ClearAllCells();
-
-        if (cellsContainer != null)
+        if (cellsContainer == null) return;
+        var existing = cellsContainer.GetComponentsInChildren<GridCell>(true);
+        foreach (var cell in existing)
         {
-            for (int i = cellsContainer.childCount - 1; i >= 0; i--)
-                DestroyImmediate(cellsContainer.GetChild(i).gameObject);
+            if (cell == null || cell.transform == cellsContainer) continue;
+            // Оставляем вспомогательные дочерние объекты контейнера; префаб-источник должен лежать отдельно.
+            if (Application.isPlaying)
+            {
+                cell.gameObject.SetActive(false);
+                Destroy(cell.gameObject);
+            }
+            else
+            {
+#if UNITY_EDITOR
+                Undo.DestroyObjectImmediate(cell.gameObject);
+#else
+                Destroy(cell.gameObject);
+#endif
+            }
         }
-        else
-        {
-            var existing = gridHolder.GetComponentsInChildren<GridCell>();
-            foreach (var cell in existing)
-                DestroyImmediate(cell.gameObject);
-        }
+        generatedCells.Clear();
+        columns.Clear();
     }
 
     private bool ValidateReferences()
     {
-        if (targetsContainer == null) Debug.LogError("TargetsContainer not assigned!");
-        if (gridHolder == null) Debug.LogError("GridHolder not assigned!");
-        if (cellPrefab == null) Debug.LogError("Cell Prefab not assigned!");
-        if (cellsContainer == null) Debug.LogError("CellsContainer not assigned!");
-        return targetsContainer && gridHolder && cellPrefab && cellsContainer;
+        if (targetsContainer == null || gridHolder == null || cellPrefab == null || cellsContainer == null)
+        {
+            Debug.LogError("Grid: assign TargetsContainer, GridHolder, CellPrefab and CellsContainer.", this);
+            return false;
+        }
+        if (!(gridHolder.CellSize > 0) || float.IsInfinity(gridHolder.CellSize) || maxScanColumns < 1 ||
+            !Finite(heightOffset) || !NonNegative(verticalMergeThreshold) || !NonNegative(neighborHeightThreshold) ||
+            !NonNegative(minClearanceHeight) || !NonNegative(clearanceCheckRadius) ||
+            !NonNegative(clearanceRayOffset) || !Finite(maxSlopeAngle) || maxSlopeAngle < 0 || maxSlopeAngle > 90)
+        {
+            Debug.LogError("Grid: invalid cell size, slope or distance settings.", this);
+            return false;
+        }
+        if (cellPrefab.transform.IsChildOf(cellsContainer) || cellsContainer.IsChildOf(targetsContainer) ||
+            targetsContainer.IsChildOf(cellsContainer))
+        {
+            Debug.LogError("Grid: use separate target/cell hierarchies and keep CellPrefab outside CellsContainer.", this);
+            return false;
+        }
+        return true;
     }
 
-    private Bounds CalculateBounds()
-    {
-        var renderers = targetsContainer.GetComponentsInChildren<Renderer>();
-        if (renderers.Length == 0)
-            return new Bounds(targetsContainer.position, Vector3.one * 10f);
-        Bounds b = renderers[0].bounds;
-        for (int i = 1; i < renderers.Length; i++) b.Encapsulate(renderers[i].bounds);
-        return b;
-    }
-
-    private bool IsTargetChild(Transform t) => t.IsChildOf(targetsContainer);
-    private bool AngleTooSteep(Vector3 normal) => Vector3.Angle(normal, Vector3.up) > maxSlopeAngle;
-
-    private Vector3Int WorldToGridPos(Vector3 worldPos) =>
-        new Vector3Int(
-            Mathf.RoundToInt((worldPos.x - transform.position.x) / gridHolder.CellSize),
-            Mathf.RoundToInt(worldPos.y / gridHolder.CellSize),
-            Mathf.RoundToInt((worldPos.z - transform.position.z) / gridHolder.CellSize)
-        );
-
-    private Vector3 GridToWorldPos(Vector3Int gridPos) =>
-        new Vector3(
-            gridPos.x * gridHolder.CellSize + transform.position.x,
-            0,
-            gridPos.z * gridHolder.CellSize + transform.position.z
-        );
+    private static bool Finite(float value) => !float.IsNaN(value) && !float.IsInfinity(value);
+    private static bool NonNegative(float value) => value >= 0 && Finite(value);
 }

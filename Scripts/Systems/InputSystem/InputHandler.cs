@@ -1,88 +1,30 @@
 using System;
-using UnityEngine;
+using System.Collections.Generic;
+using Shared.Inputs;
 
-/// <summary>
-/// Базовый класс для подписки на события ввода
-/// </summary>
+/// <summary>Р’Р»Р°РґРµРµС‚ РїРѕРґРїРёСЃРєР°РјРё РєРѕРЅС‚РµРєСЃС‚Р° Рё СЃРЅРёРјР°РµС‚ РёС… СЃ С‚РµС… Р¶Рµ РѕР±СЉРµРєС‚РѕРІ СЃРѕР±С‹С‚РёР№, РґР°Р¶Рµ РїРѕСЃР»Рµ СЃРјРµРЅС‹ singleton.</summary>
 public abstract class InputHandler : IDisposable
 {
-    public void Dispose()
+    private readonly IGameActionSource source;
+    internal IGameActionSource ActionSource => source;
+    private readonly Dictionary<(string id, Action callback), IDisposable> subscriptions = new();
+    protected InputHandler(IGameActionSource source = null) => this.source = source;
+    protected void SubscribeToAction(string actionId, Action onPerformed)
     {
-
+        if (onPerformed == null || subscriptions.ContainsKey((actionId, onPerformed))) return;
+        var action = (source ?? InputManager.Instance)?.GetAction(actionId);
+        if (action == null) throw new InvalidOperationException($"{GetType().Name}: РґРµР№СЃС‚РІРёРµ '{actionId}' РѕС‚СЃСѓС‚СЃС‚РІСѓРµС‚ РІ Input Profile.");
+        subscriptions.Add((actionId, onPerformed), action.Subscribe(onPerformed));
     }
-
-    /// <summary>
-    /// Подписаться на действие по имени с защитой от дублирования
-    /// </summary>
-    protected void SubscribeToAction(string actionName,
-        Action onPressed = null,
-        Action onHeld = null,
-        Action onReleased = null)
+    protected void UnsubscribeFromAction(string actionId, Action onPerformed)
     {
-        if (InputManager.Instance == null)
-        {
-            Debug.LogError($"{GetType().Name}: InputManager.Instance is null!");
-            return;
-        }
-
-        var keyAction = InputManager.Instance.GetAction(actionName);
-        if (keyAction == null)
-        {
-            Debug.LogError($"{GetType().Name}: KeyAction '{actionName}' is null!");
-            return;
-        }
-
-        // Сохраняем подписки для возможности отписки
-        if (onPressed != null)
-        {
-            // Проверяем, не подписаны ли уже
-            keyAction.OnPressed += onPressed;
-        }
-
-        if (onHeld != null)
-        {
-            keyAction.OnHeld += onHeld;
-        }
-
-        if (onReleased != null)
-        {
-            keyAction.OnReleased += onReleased;
-        }
+        if (!subscriptions.TryGetValue((actionId, onPerformed), out var token)) return;
+        token.Dispose();
+        subscriptions.Remove((actionId, onPerformed));
     }
-
-    protected void UnsubscribeFromAction(string actionName,
-        Action onPressed = null,
-        Action onHeld = null,
-        Action onReleased = null)
+    public virtual void Dispose()
     {
-        if (InputManager.Instance == null)
-        {
-            Debug.LogError($"{GetType().Name}: InputManager.Instance is null!");
-            return;
-        }
-
-        var keyAction = InputManager.Instance.GetAction(actionName);
-        if (keyAction == null)
-        {
-            Debug.LogError($"{GetType().Name}: KeyAction '{actionName}' is null!");
-            return;
-        }
-
-        // Сохраняем подписки для возможности отписки
-        if (onPressed != null)
-        {
-            // Проверяем, не подписаны ли уже
-            keyAction.OnPressed -= onPressed;
-        }
-
-        if (onHeld != null)
-        {
-            keyAction.OnHeld -= onHeld;
-        }
-
-        if (onReleased != null)
-        {
-            keyAction.OnReleased -= onReleased;
-        }
+        foreach (var token in subscriptions.Values) token.Dispose();
+        subscriptions.Clear();
     }
 }

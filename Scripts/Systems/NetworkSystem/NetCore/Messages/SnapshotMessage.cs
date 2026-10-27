@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 
 namespace Assets.Scripts.Network.NetCore
@@ -10,6 +10,8 @@ namespace Assets.Scripts.Network.NetCore
         /// Идентификатор клиента, которому предназначен снапшот
         /// </summary>
         public Guid TargetClientId { get; set; }
+        public Guid RequestId { get; set; }
+        public long ServerSequence { get; set; }
 
         /// <summary>
         /// Сериализованное состояние мира в формате JSON
